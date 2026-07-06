@@ -84,6 +84,18 @@
       background: var(--card); border: 1px solid var(--card-border);
       border-radius: var(--radius); backdrop-filter: blur(12px);
     }
+    .clock {
+      display: flex; align-items: center; justify-content: space-between; gap: 14px;
+      padding: 16px 20px; margin-bottom: 18px;
+    }
+    .clock-left { display: flex; flex-direction: column; gap: 2px; }
+    .clock-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+    .clock-time { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums;
+      letter-spacing: 0.02em; color: var(--text); }
+    .clock-meta { font-size: 12px; color: var(--muted); text-align: right; line-height: 1.6; }
+    .clock-meta b { color: var(--text); font-weight: 600; }
+    .clock.stale { opacity: .5; }
+
     form.compose { padding: 20px; box-shadow: var(--shadow); margin-bottom: 14px; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; }
     input, textarea {
@@ -190,6 +202,15 @@
       </nav>
     </header>
 
+    <!-- Live server clock (new in v2) -->
+    <div class="card clock" id="clock">
+      <div class="clock-left">
+        <div class="clock-label">Server time</div>
+        <div class="clock-time" id="clockTime">—</div>
+      </div>
+      <div class="clock-meta" id="clockMeta">waiting for server…</div>
+    </div>
+
     <!-- Home view -->
     <section id="view-home">
       <form class="compose card" id="form">
@@ -249,6 +270,7 @@
 
     const api = {
       info:   ()               => fetch('/api/info').then(r => r.json()),
+      time:   ()               => fetch('/api/time').then(r => r.json()),
       list:   (limit, offset)  => fetch(`/api/entries?limit=${limit}&offset=${offset}`).then(r => r.json()),
       create: (body)           => fetch('/api/entries', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
       remove: (id)             => fetch('/api/entries/' + id, { method: 'DELETE' }),
@@ -378,12 +400,28 @@
       if (currentView() === 'all') loadAll();
     }
 
+    // ---- live server clock (v2) --------------------------------------------
+    let clockStaleTimer;
+    function showTime({ time, version, host }) {
+      const d = new Date(time);
+      $('clockTime').textContent = isNaN(d) ? time : d.toLocaleTimeString();
+      const bits = [];
+      if (version) bits.push(`<b>v${esc(version)}</b>`);
+      if (host) bits.push(`host <b>${esc(host)}</b>`);
+      $('clockMeta').innerHTML = bits.join(' · ') || 'live';
+      $('clock').classList.remove('stale');
+      // If ticks stop (server gone / tab backgrounded), dim the card.
+      clearTimeout(clockStaleTimer);
+      clockStaleTimer = setTimeout(() => $('clock').classList.add('stale'), 4000);
+    }
+
     function connectSSE() {
       const es = new EventSource('/api/stream');
       es.addEventListener('welcome',  (e) => { const d = JSON.parse(e.data); setVersion(d.version); setOnline(d.online); });
       es.addEventListener('presence', (e) => { const d = JSON.parse(e.data); setOnline(d.online); });
       es.addEventListener('created',  (e) => { const d = JSON.parse(e.data); if (d.entry) onCreated(d.entry); });
       es.addEventListener('deleted',  (e) => { const d = JSON.parse(e.data); onDeleted(d.id); });
+      es.addEventListener('tick',     (e) => { const d = JSON.parse(e.data); showTime(d); setVersion(d.version); });
       // EventSource auto-reconnects on error; nothing to do here.
     }
 
@@ -420,6 +458,7 @@
 
     // ---- boot ---------------------------------------------------------------
     api.info().then((d) => { setVersion(d.version); setOnline(d.online); }).catch(() => {});
+    api.time().then(showTime).catch(() => {}); // immediate clock; SSE ticks keep it live
     route();
     connectSSE();
   </script>

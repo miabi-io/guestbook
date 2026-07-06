@@ -16,6 +16,18 @@ type Handler struct {
 	broker  *Broker
 	appName string
 	version string
+	host    string
+}
+
+// serverTime is the shape of the live clock payload (v2 feature). It carries
+// the version and host so a canary viewer can see exactly which build/replica
+// answered.
+func (h *Handler) serverTime() okapi.M {
+	return okapi.M{
+		"time":    time.Now().Format(time.RFC3339),
+		"version": h.version,
+		"host":    h.host,
+	}
 }
 
 // createEntryRequest is the POST /api/entries body.
@@ -50,7 +62,14 @@ func (h *Handler) Info(c *okapi.Context) error {
 		"app":     h.appName,
 		"version": h.version,
 		"online":  h.broker.Online(),
+		"host":    h.host,
 	})
+}
+
+// Time returns the current server time (plus version + host). Handy for probing
+// a canary rollout from the shell: `watch curl -s .../api/time`.
+func (h *Handler) Time(c *okapi.Context) error {
+	return c.OK(h.serverTime())
 }
 
 // ListEntries returns guestbook entries, newest first, with simple pagination.
@@ -162,6 +181,7 @@ func (h *Handler) Stream(c *okapi.Context) error {
 		welcome := okapi.Message{Event: "welcome", Data: okapi.M{
 			"version": h.version,
 			"online":  h.broker.Online(),
+			"host":    h.host,
 		}}
 		select {
 		case msgs <- welcome:

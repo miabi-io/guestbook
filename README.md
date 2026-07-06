@@ -16,8 +16,10 @@ miniature:
   routes keep precedence
 - **Live updates over SSE** — new/removed signatures stream to every open tab,
   with a real-time **connected-clients** ("N online") indicator
-- **Version badge** — the serving build's version is shown in the UI and
-  `/api/info`; ideal for watching a **canary rollout** decide which build answers
+- **Version badge + live server-time card** — the serving build's version is
+  shown in the UI and `/api/info`, and a **live clock** (streamed over SSE with
+  the server's `version` + `host`) makes a **canary rollout** obvious: the card
+  is new in v2, and its time/host reveal exactly which build/replica served you
 - **[GORM](https://gorm.io) with PostgreSQL _or_ SQLite** — `uint` PKs and soft
   deletes, the same conventions Miabi uses. Attach a Miabi managed Postgres, or
   fall back to a zero-config SQLite file (pure-Go driver, no CGO).
@@ -44,20 +46,23 @@ and keeps the container tiny.
 | Method   | Path                 | Description                        |
 |----------|----------------------|------------------------------------|
 | `GET`    | `/healthz`           | Liveness/readiness (checks the DB), reports `version` |
-| `GET`    | `/api/info`          | App name, serving `version`, connected-client count |
+| `GET`    | `/api/info`          | App name, serving `version`, `host`, connected-client count |
+| `GET`    | `/api/time`          | Current server time + `version` + `host` (v2 — canary probe) |
 | `GET`    | `/api/entries`       | List entries + total; paginated via `?limit=&offset=` |
 | `POST`   | `/api/entries`       | Create `{ "name", "message" }` (broadcast live) |
 | `DELETE` | `/api/entries/{id}`  | Delete an entry (broadcast live)   |
-| `GET`    | `/api/stream`        | **SSE** stream: `welcome`, `created`, `deleted`, `presence` events |
+| `GET`    | `/api/stream`        | **SSE** stream: `welcome`, `created`, `deleted`, `presence`, `tick` events |
 | `GET`    | `/` · `/all`         | The web UI (home · all-signatures page) |
 
 ### Live updates (SSE)
 
 `/api/stream` is a Server-Sent Events endpoint. On connect the client gets a
-`welcome` event (serving version + online count); thereafter the server pushes
-`created` / `deleted` events as the wall changes and `presence` events whenever
-the number of connected clients changes. The UI uses these to update the wall in
-real time and show a live **“N online”** indicator — no polling.
+`welcome` event (serving version + host + online count); thereafter the server
+pushes `created` / `deleted` events as the wall changes, `presence` events when
+the connected-client count changes, and a `tick` event once a second carrying
+the live server time (with `version` + `host`). The UI uses these to update the
+wall in real time, show a live **“N online”** indicator, and drive the
+**server-time card** — all without polling.
 
 ## Configuration
 
@@ -130,10 +135,19 @@ docker build --build-arg VERSION=2.0.0 -t miabi/guestbook:2.0.0 .
 1. Deploy `1.0.0` as the app; attach a **shared** managed Postgres.
 2. Roll out `2.0.0` as a **canary** with a small weight (e.g. 10%).
 3. Refresh the page a few times: ~1 in 10 loads shows the `v2.0.0` badge (a
-   different colour), the rest `v1.0.0`. Because both versions share the same
-   database, signatures created on either build appear on both — and stream
-   live to every open tab via SSE.
-4. Shift the weight up and promote `2.0.0` when you're happy.
+   different colour) **and the new live server-time card**, the rest `v1.0.0`
+   without it. Because both versions share the same database, signatures created
+   on either build appear on both — and stream live to every open tab via SSE.
+4. Watch routing from the shell — each request may hit a different build/replica:
+   ```bash
+   watch -n1 'curl -s https://your-domain/api/time'
+   # {"time":"…","version":"2.0.0","host":"…"}  ← version/host flips under canary
+   ```
+5. Shift the weight up and promote `2.0.0` when you're happy.
+
+> The server-time card is the **v2 change**: v1 (built before this feature) has
+> no clock, so its presence — and the version/host it shows — is an at-a-glance
+> signal of which build a viewer landed on.
 
 > No build args? Set `APP_VERSION=1.0.0` / `APP_VERSION=2.0.0` in each app's
 > environment instead — same effect.
