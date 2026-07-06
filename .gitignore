@@ -1,0 +1,10 @@
+.env
+/app
+/tmp
+/data
+*.log
+*.db
+*.db-shm
+*.db-wal
+guestbook
+data
