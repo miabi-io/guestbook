@@ -16,6 +16,7 @@ package main
 import (
 	"context"
 	"embed"
+	"os"
 	"time"
 
 	"github.com/jkaninda/logger"
@@ -51,8 +52,14 @@ func main() {
 		}
 	}
 
+	host, _ := os.Hostname()
 	broker := NewBroker()
-	h := &Handler{store: store, broker: broker, appName: cfg.AppName, version: cfg.Version}
+	h := &Handler{store: store, broker: broker, appName: cfg.AppName, version: cfg.Version, host: host}
+
+	// Broadcast a live server-time "tick" to all SSE clients once a second
+	// (the v2 clock card). Stopped on shutdown.
+	tickCtx, stopTicks := context.WithCancel(ctx)
+	go publishTicks(tickCtx, broker, cfg.Version, host)
 
 	app := okapi.New(okapi.WithPort(cfg.Port))
 	app.WithDebug()
@@ -61,6 +68,7 @@ func main() {
 	app.Get("/healthz", h.Health)
 	api := app.Group("/api")
 	api.Get("/info", h.Info)
+	api.Get("/time", h.Time) // current server time (v2 clock card)
 	api.Get("/entries", h.ListEntries)
 	api.Post("/entries", h.CreateEntry)
 	api.Delete("/entries/{id:int}", h.DeleteEntry)
@@ -81,6 +89,7 @@ func main() {
 			},
 			OnShutdown: func() {
 				logger.Info("shutting down")
+				stopTicks()
 				_ = store.Close()
 			},
 		})
@@ -89,6 +98,27 @@ func main() {
 
 	if err := cli.Execute(); err != nil {
 		logger.Fatal("server error", "error", err)
+	}
+}
+
+// publishTicks broadcasts a live server-time "tick" event to all connected SSE
+// clients once a second. Each replica sends its own time/host, so under a
+// canary rollout the clock card reveals exactly which build served you.
+func publishTicks(ctx context.Context, b *Broker, version, host string) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			b.Publish(Event{
+				Type:    "tick",
+				Time:    now.Format(time.RFC3339),
+				Version: version,
+				Host:    host,
+			})
+		}
 	}
 }
 

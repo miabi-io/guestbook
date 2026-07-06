@@ -8,11 +8,15 @@ import "sync"
 //   - "created"  → Entry is set (a new signature)
 //   - "deleted"  → ID is set (a removed signature)
 //   - "presence" → Online is set (connected-client count changed)
+//   - "tick"     → Time/Version/Host are set (live server clock; new in v2)
 type Event struct {
-	Type   string `json:"type"`
-	Entry  *Entry `json:"entry,omitempty"`
-	ID     uint   `json:"id,omitempty"`
-	Online int    `json:"online,omitempty"`
+	Type    string `json:"type"`
+	Entry   *Entry `json:"entry,omitempty"`
+	ID      uint   `json:"id,omitempty"`
+	Online  int    `json:"online,omitempty"`
+	Time    string `json:"time,omitempty"`
+	Version string `json:"version,omitempty"`
+	Host    string `json:"host,omitempty"`
 }
 
 // Broker is a tiny in-process pub/sub hub. Each connected SSE client holds one
