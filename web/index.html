@@ -143,13 +143,28 @@
     }
     .entry .who { font-weight: 600; }
     .entry .when { color: var(--muted); }
-    .del {
-      position: absolute; top: 14px; right: 14px; cursor: pointer;
-      background: transparent; border: 0; color: var(--muted); font-size: 17px; line-height: 1;
-      padding: 4px 7px; border-radius: 8px; opacity: 0; transition: opacity .15s, color .15s, background .15s;
+    .entry .via {
+      margin-left: auto; font-size: 11.5px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: rgba(0,0,0,.2); border: 1px solid var(--card-border); padding: 2px 8px; border-radius: 999px;
+      max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    li.entry:hover .del { opacity: 1; }
-    .del:hover { color: var(--danger); background: rgba(244, 63, 94, 0.12); }
+    li.entry.pinned { border-color: rgba(139, 92, 246, 0.55); background: rgba(139, 92, 246, 0.08); }
+    .pin {
+      position: absolute; top: 14px; right: 16px; font-size: 11px; font-weight: 700; letter-spacing: .06em;
+      text-transform: uppercase; color: var(--accent-2);
+    }
+
+    .banner {
+      display: flex; gap: 10px; align-items: flex-start; padding: 13px 18px; margin-bottom: 18px;
+      border-color: rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.1); font-size: 14.5px; line-height: 1.5;
+    }
+    .banner .icon { flex: 0 0 auto; }
+    .paused {
+      text-align: center; padding: 22px 20px; margin-bottom: 14px; color: var(--muted); font-size: 15px;
+    }
+    .paused b { color: var(--text); }
+    .replicas { font-size: 12.5px; color: var(--muted); padding: 5px 12px; border-radius: 999px;
+      background: var(--card); border: 1px solid var(--card-border); white-space: nowrap; }
 
     .empty, .loading { text-align: center; color: var(--muted); padding: 40px 20px; font-size: 15px; }
 
@@ -170,6 +185,8 @@
     footer { text-align: center; margin-top: 46px; color: var(--muted); font-size: 13px; line-height: 1.8; }
     footer a { color: var(--accent-2); text-decoration: none; }
     footer a:hover { text-decoration: underline; }
+    .miabi-badge { display: block; width: fit-content; margin: 0 auto 16px; line-height: 0; border-radius: 16px; transition: transform .15s, box-shadow .15s; }
+    .miabi-badge:hover { transform: translateY(-1px); box-shadow: 0 8px 24px -8px rgba(139, 92, 246, 0.6); }
     .stack { display: inline-flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
     .pill { background: var(--card); border: 1px solid var(--card-border); padding: 3px 10px; border-radius: 999px; }
 
@@ -189,6 +206,7 @@
       <div class="logo"><span class="dot"></span> Deployed on Miabi</div>
       <div class="status">
         <span class="ver" id="ver" title="Serving version">v…</span>
+        <span class="replicas" id="replicas" title="Running replicas" hidden></span>
         <span class="online"><span class="pulse"></span> <span id="online">0</span> online</span>
       </div>
     </div>
@@ -202,6 +220,8 @@
       </nav>
     </header>
 
+    <div class="card banner" id="banner" hidden><span class="icon">📣</span><span id="bannerText"></span></div>
+
     <!-- Live server clock (new in v2) -->
     <div class="card clock" id="clock">
       <div class="clock-left">
@@ -213,6 +233,7 @@
 
     <!-- Home view -->
     <section id="view-home">
+      <div class="card paused" id="paused" hidden>✋ <b>Signing is paused</b> by a moderator. The wall is read-only for now.</div>
       <form class="compose card" id="form">
         <div class="row">
           <input class="name-field" id="name" type="text" placeholder="Your name (optional)" maxlength="60" autocomplete="off" />
@@ -249,14 +270,19 @@
     </section>
 
     <footer>
+      <a class="miabi-badge" href="https://miabi.io?ref=badge" target="_blank" rel="noopener">
+        <img src="/badges/running-on-miabi-dark.svg" alt="Running on Miabi" width="156" height="32" />
+      </a>
       <div class="stack">
         <span class="pill">Okapi</span>
         <span class="pill">Go</span>
         <span class="pill">SSE live</span>
         <span class="pill">Single container</span>
+        <span class="pill" id="brokerPill" hidden></span>
       </div>
       <div style="margin-top:12px">
-        The open-source PaaS for Docker · <a href="https://github.com/miabi-io/miabi" target="_blank" rel="noopener">github.com/miabi-io/miabi</a>
+        Ship apps, not infrastructure · <a href="https://github.com/miabi-io/miabi" target="_blank" rel="noopener">github.com/miabi-io/miabi</a>
+        <span id="adminLink" hidden> · <a href="/admin">Admin</a></span>
       </div>
     </footer>
   </div>
@@ -271,9 +297,9 @@
     const api = {
       info:   ()               => fetch('/api/info').then(r => r.json()),
       time:   ()               => fetch('/api/time').then(r => r.json()),
+      settings: ()             => fetch('/api/settings').then(r => r.json()),
       list:   (limit, offset)  => fetch(`/api/entries?limit=${limit}&offset=${offset}`).then(r => r.json()),
       create: (body)           => fetch('/api/entries', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
-      remove: (id)             => fetch('/api/entries/' + id, { method: 'DELETE' }),
     };
 
     let total = 0;        // total signatures (kept in sync via SSE)
@@ -300,13 +326,16 @@
     }
 
     function cardHTML(e) {
-      return `<li class="entry card" data-id="${e.id}">
-          <button class="del" title="Delete" aria-label="Delete">✕</button>
+      const via = e.replica && e.replica !== 'seed'
+        ? `<span class="via" title="Accepted by replica ${esc(e.replica)}">via ${esc(e.replica)}</span>` : '';
+      return `<li class="entry card${e.pinned ? ' pinned' : ''}" data-id="${e.id}">
+          ${e.pinned ? '<span class="pin">📌 Pinned</span>' : ''}
           <div class="msg">${esc(e.message)}</div>
           <div class="foot">
             <span class="avatar" style="background:${colorFor(e.name)}">${esc(initials(e.name))}</span>
             <span class="who">${esc(e.name)}</span>
             <span class="when">· ${timeAgo(e.created_at)}</span>
+            ${via}
           </div>
         </li>`;
     }
@@ -332,7 +361,20 @@
       let h = 0; for (const c of String(v)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
       el.style.background = `hsl(${h % 360} 70% 52%)`;
     }
-    function setOnline(n) { $('online').textContent = n; }
+    function setOnline(n) { $('online').textContent = n || 0; }
+    function setReplicas(n) {
+      if (!n) return;
+      $('replicas').hidden = false;
+      $('replicas').textContent = n === 1 ? '1 replica' : n + ' replicas';
+    }
+    function applySettings(st) {
+      const banner = (st && st.banner) || '';
+      $('banner').hidden = !banner;
+      $('bannerText').textContent = banner;
+      const paused = !!(st && st.signing_paused);
+      $('paused').hidden = !paused;
+      $('form').hidden = paused;
+    }
 
     // ---- views --------------------------------------------------------------
     async function loadHome() {
@@ -383,21 +425,25 @@
     window.addEventListener('popstate', route);
 
     // ---- live SSE events ----------------------------------------------------
+    // Pinned entries stay on top, so a new signature goes right after them.
     function onCreated(entry) {
       setTotals(total + 1);
       if (currentView() === 'home') {
         const ul = $('entries');
         if (ul.querySelector('.empty')) ul.innerHTML = '';
-        ul.insertAdjacentHTML('afterbegin', cardHTML(entry));
+        const pins = ul.querySelectorAll('.entry.pinned');
+        const html = cardHTML(entry);
+        if (pins.length) pins[pins.length - 1].insertAdjacentHTML('afterend', html);
+        else ul.insertAdjacentHTML('afterbegin', html);
         while (ul.children.length > HOME_SIZE) ul.lastElementChild.remove();
       } else if (allOffset === 0) {
         loadAll();
       }
     }
+    function reloadView() { currentView() === 'all' ? loadAll() : loadHome(); }
     function onDeleted(id) {
-      setTotals(Math.max(0, total - 1));
       document.querySelectorAll(`.entry[data-id="${id}"]`).forEach((el) => el.remove());
-      if (currentView() === 'all') loadAll();
+      reloadView();
     }
 
     // ---- live server clock (v2) --------------------------------------------
@@ -415,12 +461,17 @@
       clockStaleTimer = setTimeout(() => $('clock').classList.add('stale'), 4000);
     }
 
+    let connectedOnce = false;
     function connectSSE() {
       const es = new EventSource('/api/stream');
-      es.addEventListener('welcome',  (e) => { const d = JSON.parse(e.data); setVersion(d.version); setOnline(d.online); });
-      es.addEventListener('presence', (e) => { const d = JSON.parse(e.data); setOnline(d.online); });
-      es.addEventListener('created',  (e) => { const d = JSON.parse(e.data); if (d.entry) onCreated(d.entry); });
+      es.addEventListener('welcome',  (e) => { const d = JSON.parse(e.data); setVersion(d.version); setOnline(d.online); setReplicas(d.replicas); });
+      es.addEventListener('presence', (e) => { const d = JSON.parse(e.data); setOnline(d.online); setReplicas(d.replicas); });
+      es.addEventListener('created',  (e) => { const d = JSON.parse(e.data); if (d.entry && !d.entry.hidden) onCreated(d.entry); });
+      es.addEventListener('updated',  () => reloadView());
       es.addEventListener('deleted',  (e) => { const d = JSON.parse(e.data); onDeleted(d.id); });
+      es.addEventListener('settings', (e) => { const d = JSON.parse(e.data); applySettings(d.settings); });
+      // Resync after a reconnect: events sent while disconnected were missed.
+      es.addEventListener('open', () => { if (connectedOnce) { reloadView(); api.settings().then(applySettings).catch(() => {}); } connectedOnce = true; });
       es.addEventListener('tick',     (e) => { const d = JSON.parse(e.data); showTime(d); setVersion(d.version); });
       // EventSource auto-reconnects on error; nothing to do here.
     }
@@ -442,22 +493,16 @@
       finally { btn.disabled = false; }
     });
 
-    document.addEventListener('click', async (e) => {
-      const btn = e.target.closest('.del');
-      if (!btn) return;
-      const li = btn.closest('.entry');
-      const id = li.dataset.id;
-      li.style.opacity = '.4';
-      const res = await api.remove(id);
-      if (!(res.ok || res.status === 404)) { li.style.opacity = '1'; toast('Could not delete'); }
-      // Removal is reflected via SSE ("deleted").
-    });
-
     $('prev').addEventListener('click', () => { allOffset = Math.max(0, allOffset - PAGE_SIZE); loadAll(); });
     $('next').addEventListener('click', () => { allOffset += PAGE_SIZE; loadAll(); });
 
     // ---- boot ---------------------------------------------------------------
-    api.info().then((d) => { setVersion(d.version); setOnline(d.online); }).catch(() => {});
+    api.info().then((d) => {
+      setVersion(d.version); setOnline(d.online); setReplicas((d.replicas || []).length);
+      $('adminLink').hidden = !d.admin;
+      if (d.broker) { $('brokerPill').hidden = false; $('brokerPill').textContent = d.broker === 'redis' ? 'Redis pub/sub' : 'In-process broker'; }
+    }).catch(() => {});
+    api.settings().then(applySettings).catch(() => {});
     api.time().then(showTime).catch(() => {}); // immediate clock; SSE ticks keep it live
     route();
     connectSSE();

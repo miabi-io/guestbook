@@ -42,22 +42,24 @@ func seedEntries(driver string) []struct{ Name, Message string } {
 	}
 }
 
+// Seed populates an empty wall with sample signatures.
 func Seed(ctx context.Context, store *Store, driver string) error {
-	count, err := store.Count(ctx)
-	if err != nil {
-		return err
-	}
-	if count > 0 {
-		logger.Info("seed skipped, entries already present", "count", count)
-		return nil
-	}
-
-	entries := seedEntries(driver)
-	for _, e := range entries {
-		if _, err := store.Create(ctx, e.Name, e.Message); err != nil {
+	return store.Exclusive(ctx, func(tx *Store) error {
+		count, err := tx.Count(ctx)
+		if err != nil {
 			return err
 		}
-	}
-	logger.Info("database seeded", "entries", len(entries))
-	return nil
+		if count > 0 {
+			logger.Info("seed skipped, entries already present", "count", count)
+			return nil
+		}
+		entries := seedEntries(driver)
+		for _, e := range entries {
+			if _, err := tx.Create(ctx, e.Name, e.Message, "seed", ""); err != nil {
+				return err
+			}
+		}
+		logger.Info("database seeded", "entries", len(entries))
+		return nil
+	})
 }
