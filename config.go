@@ -18,6 +18,15 @@ type Config struct {
 	AppName     string
 	Version     string
 	Seed        bool
+
+	// RedisURL enables the cross-replica broker; empty keeps it in-process.
+	RedisURL string
+	// AdminToken enables the /admin console; empty disables it.
+	AdminToken string
+	// DebugEndpoints exposes the /api/debug failure-injection endpoints.
+	DebugEndpoints bool
+	// TrustedProxies limits whose X-Forwarded-For is believed (CIDRs).
+	TrustedProxies []string
 }
 
 // LoadConfig builds the Config from the environment.
@@ -30,6 +39,11 @@ func LoadConfig() (Config, error) {
 		Seed:        goutils.Env("SEED", "true") == "true",
 		DBDriver:    driver,
 		DatabaseDSN: dsn,
+
+		RedisURL:       goutils.Env("REDIS_URL", goutils.Env("REDIS_DATABASE_URL", "")),
+		AdminToken:     goutils.Env("ADMIN_TOKEN", ""),
+		DebugEndpoints: goutils.Env("DEBUG_ENDPOINTS", "false") == "true",
+		TrustedProxies: splitList(goutils.Env("TRUSTED_PROXIES", "")),
 	}, nil
 }
 
@@ -79,4 +93,14 @@ func postgresDSN() string {
 		goutils.EnvInt("DB_PORT", 5432),
 		goutils.Env("DB_SSL_MODE", "disable"),
 	)
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

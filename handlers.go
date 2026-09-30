@@ -3,21 +3,31 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jkaninda/okapi"
 )
 
 // Handler holds the dependencies for the HTTP layer.
 type Handler struct {
-	store   *Store
-	broker  *Broker
-	appName string
-	version string
-	host    string
+	store    *Store
+	broker   *Broker
+	auth     *AdminAuth
+	appName  string
+	version  string
+	host     string
+	dbDriver string
+	debug    bool
+	started  time.Time
+
+	unhealthy atomic.Bool
+	chaos     chaosState
 }
 
 // serverTime is the shape of the live clock payload (v2 feature). It carries
@@ -45,6 +55,14 @@ const (
 // Health reports liveness/readiness. Returns 503 when the database is
 // unreachable so Miabi's health checks hold traffic until the DB is up.
 func (h *Handler) Health(c *okapi.Context) error {
+	if h.unhealthy.Load() {
+		return c.JSON(http.StatusServiceUnavailable, okapi.M{
+			"status":  "unavailable",
+			"reason":  "forced unhealthy via /api/debug/health",
+			"version": h.version,
+			"host":    h.host,
+		})
+	}
 	if err := h.store.Ping(c.Request().Context()); err != nil {
 		return c.JSON(http.StatusServiceUnavailable, okapi.M{
 			"status":  "unavailable",
@@ -52,7 +70,14 @@ func (h *Handler) Health(c *okapi.Context) error {
 			"version": h.version,
 		})
 	}
-	return c.OK(okapi.M{"status": "ok", "db": "up", "app": h.appName, "version": h.version})
+	return c.OK(okapi.M{
+		"status":  "ok",
+		"db":      "up",
+		"redis":   h.broker.RedisStatus(c.Request().Context()),
+		"app":     h.appName,
+		"version": h.version,
+		"host":    h.host,
+	})
 }
 
 // Info returns app metadata for the UI: name, the serving version (useful for
@@ -60,11 +85,23 @@ func (h *Handler) Health(c *okapi.Context) error {
 // are currently connected.
 func (h *Handler) Info(c *okapi.Context) error {
 	return c.OK(okapi.M{
-		"app":     h.appName,
-		"version": h.version,
-		"online":  h.broker.Online(),
-		"host":    h.host,
+		"app":      h.appName,
+		"version":  h.version,
+		"online":   h.broker.Online(),
+		"host":     h.host,
+		"broker":   h.broker.Mode(),
+		"replicas": h.broker.Replicas(),
+		"admin":    h.auth.Enabled(),
 	})
+}
+
+// PublicSettings returns the wall state visitors need: paused flag and banner.
+func (h *Handler) PublicSettings(c *okapi.Context) error {
+	st, err := h.store.Settings(c.Request().Context())
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, okapi.M{"error": "could not load settings"})
+	}
+	return c.OK(st)
 }
 
 // Time returns the current server time (plus version + host). Handy for probing
@@ -73,7 +110,7 @@ func (h *Handler) Time(c *okapi.Context) error {
 	return c.OK(h.serverTime())
 }
 
-// ListEntries returns guestbook entries, newest first, with simple pagination.
+// ListEntries returns visible entries, pinned first, with simple pagination.
 // Query params: limit (default 100, max 200) and offset (default 0). The home
 // page requests a small limit; the "All signatures" page pages through them.
 func (h *Handler) ListEntries(c *okapi.Context) error {
@@ -92,7 +129,7 @@ func (h *Handler) ListEntries(c *okapi.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, okapi.M{"error": "could not load entries"})
 	}
-	count, _ := h.store.Count(ctx)
+	count, _ := h.store.CountVisible(ctx)
 	return c.OK(okapi.M{
 		"entries": entries,
 		"total":   count,
@@ -115,6 +152,12 @@ func atoiDefault(s string, def int) int {
 
 // CreateEntry adds a new signature to the wall and broadcasts it live.
 func (h *Handler) CreateEntry(c *okapi.Context) error {
+	ctx := c.Request().Context()
+	// Read from the DB rather than a cache so a pause applies on every replica.
+	if st, err := h.store.Settings(ctx); err == nil && st.SigningPaused {
+		return c.JSON(http.StatusServiceUnavailable, okapi.M{"error": "signing is paused by a moderator"})
+	}
+
 	var req createEntryRequest
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, okapi.M{"error": "invalid JSON body"})
@@ -126,19 +169,19 @@ func (h *Handler) CreateEntry(c *okapi.Context) error {
 	if name == "" {
 		name = "Anonymous"
 	}
-	if len(name) > maxNameLen {
-		name = name[:maxNameLen]
+	if r := []rune(name); len(r) > maxNameLen {
+		name = string(r[:maxNameLen])
 	}
 	if message == "" {
 		return c.JSON(http.StatusBadRequest, okapi.M{"error": "message is required"})
 	}
-	if len(message) > maxMessageLen {
+	if utf8.RuneCountInString(message) > maxMessageLen {
 		return c.JSON(http.StatusBadRequest, okapi.M{
 			"error": "message is too long (max 500 characters)",
 		})
 	}
 
-	entry, err := h.store.Create(c.Request().Context(), name, message)
+	entry, err := h.store.Create(ctx, name, message, h.host, clientIP(c))
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, okapi.M{"error": "could not save entry"})
 	}
@@ -147,7 +190,7 @@ func (h *Handler) CreateEntry(c *okapi.Context) error {
 	return c.Created(entry)
 }
 
-// DeleteEntry removes an entry by id and broadcasts the removal live.
+// DeleteEntry soft-deletes an entry by id and broadcasts the removal live.
 func (h *Handler) DeleteEntry(c *okapi.Context) error {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -180,9 +223,10 @@ func (h *Handler) Stream(c *okapi.Context) error {
 		defer close(msgs)
 
 		welcome := okapi.Message{Event: "welcome", Data: okapi.M{
-			"version": h.version,
-			"online":  h.broker.Online(),
-			"host":    h.host,
+			"version":  h.version,
+			"online":   h.broker.Online(),
+			"replicas": len(h.broker.Replicas()),
+			"host":     h.host,
 		}}
 		select {
 		case msgs <- welcome:
@@ -216,4 +260,17 @@ func (h *Handler) Stream(c *okapi.Context) error {
 		return nil
 	}
 	return err
+}
+
+// clientIP returns the caller's address as seen through the gateway. Without
+// TRUSTED_PROXIES the forwarded headers are taken at face value, which is
+// fine for display but spoofable.
+func clientIP(c *okapi.Context) string {
+	if ip := c.RealIP(); net.ParseIP(ip) != nil {
+		return ip
+	}
+	if host, _, err := net.SplitHostPort(c.Request().RemoteAddr); err == nil {
+		return host
+	}
+	return ""
 }

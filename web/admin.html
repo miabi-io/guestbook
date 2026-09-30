@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Guestbook Admin</title>
+  <meta name="robots" content="noindex" />
+  <style>
+    :root {
+      --bg: #0b0a12;
+      --bg-2: #12101d;
+      --card: rgba(255, 255, 255, 0.04);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text: #ece9f5;
+      --muted: #9b95b3;
+      --accent: #8b5cf6;
+      --accent-2: #a855f7;
+      --danger: #f43f5e;
+      --warn: #f59e0b;
+      --ok: #22c55e;
+      --radius: 16px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(900px 500px at 15% -10%, rgba(139, 92, 246, 0.16), transparent 60%),
+        radial-gradient(700px 500px at 110% 10%, rgba(168, 85, 247, 0.12), transparent 55%),
+        linear-gradient(180deg, var(--bg), var(--bg-2));
+      background-attachment: fixed;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 20px 80px; }
+    [hidden] { display: none !important; }
+    a { color: var(--accent-2); }
+
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 22px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 750; font-size: 18px; letter-spacing: -0.01em; }
+    .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px 2px var(--accent); }
+    .brand small { font-weight: 500; color: var(--muted); font-size: 13px; }
+    .top-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted);
+      padding: 5px 12px; border-radius: 999px; background: var(--card); border: 1px solid var(--card-border); white-space: nowrap;
+    }
+    .chip b { color: var(--text); font-weight: 600; font-family: var(--mono); font-size: 12px; }
+    .ver { font-size: 12.5px; font-weight: 700; color: #fff; padding: 5px 12px; border-radius: 999px; background: var(--accent); }
+
+    .card { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius); backdrop-filter: blur(12px); }
+    .pad { padding: 20px; }
+    h2 { font-size: 13px; font-weight: 650; color: var(--muted); margin: 0 0 14px; letter-spacing: 0.06em; text-transform: uppercase; }
+    h3 { font-size: 15px; margin: 0 0 6px; }
+    p.hint { color: var(--muted); font-size: 13.5px; line-height: 1.55; margin: 0 0 14px; }
+    code { font-family: var(--mono); font-size: 12.5px; background: rgba(0,0,0,.3); padding: 1px 6px; border-radius: 6px; }
+
+    button, .btn {
+      font: inherit; font-size: 13.5px; font-weight: 600; color: var(--text); cursor: pointer; text-decoration: none;
+      background: rgba(255,255,255,.06); border: 1px solid var(--card-border); border-radius: 10px; padding: 8px 14px;
+      transition: border-color .15s, background .15s, opacity .15s; display: inline-flex; align-items: center; gap: 6px;
+    }
+    button:hover:not(:disabled), .btn:hover { border-color: var(--accent); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.primary { color: #fff; border: 0; background: linear-gradient(120deg, var(--accent), var(--accent-2)); }
+    button.danger { color: #fecdd3; border-color: rgba(244, 63, 94, .4); background: rgba(244, 63, 94, .12); }
+    button.danger:hover:not(:disabled) { border-color: var(--danger); }
+    button.small { font-size: 12.5px; padding: 5px 10px; border-radius: 8px; }
+
+    input, select, textarea {
+      font: inherit; font-size: 14px; color: var(--text); background: rgba(0, 0, 0, 0.28);
+      border: 1px solid var(--card-border); border-radius: 10px; padding: 9px 12px; outline: none;
+    }
+    input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.22); }
+    select option { background: var(--bg-2); }
+
+    .tabs { display: inline-flex; gap: 4px; padding: 4px; border-radius: 12px; background: var(--card); border: 1px solid var(--card-border); margin-bottom: 20px; flex-wrap: wrap; }
+    .tabs a { text-decoration: none; color: var(--muted); font-size: 14px; font-weight: 600; padding: 8px 16px; border-radius: 9px; }
+    .tabs a.active { color: #fff; background: linear-gradient(120deg, var(--accent), var(--accent-2)); }
+    .tabs a:not(.active):hover { color: var(--text); }
+
+    .center-card { max-width: 440px; margin: 60px auto; text-align: center; }
+    .center-card input { width: 100%; margin: 14px 0 12px; text-align: center; }
+    .center-card button { width: 100%; justify-content: center; padding: 11px; }
+
+    .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .tile { padding: 16px 18px; }
+    .tile .label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+    .tile .value { font-size: 28px; font-weight: 800; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    .tile.live .value { color: var(--ok); }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 820px) { .grid-2 { grid-template-columns: 1fr; } }
+    .stack { display: grid; gap: 16px; }
+
+    .chart { display: flex; align-items: flex-end; gap: 6px; height: 150px; padding-top: 8px; }
+    .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; justify-content: flex-end; min-width: 0; }
+    .bar { width: 100%; max-width: 34px; border-radius: 6px 6px 3px 3px; background: linear-gradient(180deg, var(--accent-2), var(--accent)); min-height: 3px; position: relative; }
+    .bar.zero { background: rgba(255,255,255,.08); }
+    .bar-col .n { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .bar-col .d { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+    th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 0 8px 8px; border-bottom: 1px solid var(--card-border); }
+    td { padding: 9px 8px; border-bottom: 1px solid rgba(255,255,255,.04); vertical-align: top; }
+    td.mono { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+    tr.me td { color: #fff; }
+    tr.me td:first-child::after { content: " ← you"; color: var(--accent-2); font-family: inherit; font-size: 11.5px; }
+    dl.kv { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 0; font-size: 13.5px; }
+    dl.kv dt { color: var(--muted); }
+    dl.kv dd { margin: 0; font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+
+    .dot-s { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+    .ok { background: var(--ok); } .bad { background: var(--danger); } .off { background: var(--muted); }
+
+    .toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+    .toolbar input[type=search] { flex: 1 1 220px; }
+    .seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: 10px; background: rgba(0,0,0,.25); border: 1px solid var(--card-border); }
+    .seg button { border: 0; background: transparent; padding: 6px 12px; border-radius: 8px; font-size: 13px; color: var(--muted); }
+    .seg button.on { background: rgba(139, 92, 246, .35); color: #fff; }
+
+    .rows { display: grid; gap: 10px; }
+    .row { padding: 14px 16px; display: grid; grid-template-columns: 1fr auto; gap: 8px 14px; align-items: start; }
+    .row.is-hidden { opacity: .6; border-style: dashed; }
+    .row.is-pinned { border-color: rgba(139, 92, 246, 0.55); }
+    .row .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
+    .row .who { font-weight: 650; font-size: 14px; }
+    .row .when, .row .id { color: var(--muted); }
+    .row .msg { grid-column: 1 / -1; font-size: 14.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+    .row .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    .badge { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; }
+    .badge.pin { color: #ddd6fe; background: rgba(139, 92, 246, .3); }
+    .badge.hid { color: #fde68a; background: rgba(245, 158, 11, .2); }
+    .ip { font-family: var(--mono); font-size: 11.5px; color: #a5f3fc; background: rgba(34, 211, 238, .1); border: 1px solid rgba(34, 211, 238, .25); padding: 1px 8px; border-radius: 999px; cursor: pointer; }
+    .rep { font-family: var(--mono); font-size: 11.5px; color: var(--muted); background: rgba(0,0,0,.25); border: 1px solid var(--card-border); padding: 1px 8px; border-radius: 999px; }
+    @media (max-width: 620px) { .row { grid-template-columns: 1fr; } .row .acts { justify-content: flex-start; } }
+
+    .pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 16px; }
+    .pager .info { font-size: 13px; color: var(--muted); min-width: 110px; text-align: center; }
+    .empty { text-align: center; color: var(--muted); padding: 36px 20px; }
+
+    .switch { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 4px 0 18px; border-bottom: 1px solid var(--card-border); margin-bottom: 18px; }
+    .toggle { position: relative; width: 46px; height: 26px; flex: 0 0 auto; }
+    .toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+    .toggle span { position: absolute; inset: 0; border-radius: 999px; background: rgba(255,255,255,.12); cursor: pointer; transition: background .15s; }
+    .toggle span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .15s; }
+    .toggle input:checked + span { background: var(--warn); }
+    .toggle input:checked + span::after { transform: translateX(20px); }
+    .toggle input:focus-visible + span { box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.4); }
+    label.field { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+    .field-row { display: flex; gap: 10px; align-items: center; }
+    .field-row input { flex: 1; }
+
+    .chaos-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .chaos { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+    .chaos p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; flex: 1; }
+    .chaos .inputs { display: flex; gap: 8px; }
+    .chaos .inputs input, .chaos .inputs select { width: 100%; min-width: 0; padding: 7px 10px; font-size: 13px; }
+    .chaos .shows { font-size: 11.5px; color: var(--accent-2); }
+
+    .probe-bars { display: grid; gap: 8px; margin-top: 14px; }
+    .pb { display: grid; grid-template-columns: minmax(120px, 260px) 1fr 96px; gap: 10px; align-items: center; font-size: 13px; }
+    .pb .k { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pb .track { height: 12px; border-radius: 999px; background: rgba(255,255,255,.06); overflow: hidden; }
+    .pb .fill { height: 100%; border-radius: 999px; }
+    .pb .v { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+    @media (max-width: 620px) { .pb { grid-template-columns: 1fr 60px; } .pb .track { grid-column: 1 / -1; grid-row: 2; } }
+
+    .log { font-family: var(--mono); font-size: 12px; line-height: 1.7; max-height: 260px; overflow: auto; background: rgba(0,0,0,.3); border-radius: 10px; padding: 10px 12px; }
+    .log div { white-space: pre-wrap; word-break: break-word; }
+    .log .t { color: var(--muted); }
+    .log .e { color: #fda4af; } .log .s { color: #86efac; } .log .w { color: #fcd34d; }
+
+    .toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(20px); background: #1f1b2e; border: 1px solid var(--card-border);
+      color: white; padding: 11px 18px; border-radius: 12px; font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    .toast.err { background: var(--danger); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand"><span class="dot"></span> Guestbook Admin <small id="appName"></small></div>
+      <div class="top-right">
+        <span class="chip" title="Replica that answered the last request">served by <b id="servedBy">…</b></span>
+        <span class="ver" id="ver">v…</span>
+        <a class="btn" href="/">← Wall</a>
+        <button id="logout" hidden>Sign out</button>
+      </div>
+    </div>
+
+    <section id="view-disabled" class="card pad center-card" hidden>
+      <h3>Admin console is disabled</h3>
+      <p class="hint">Set an <code>ADMIN_TOKEN</code> secret on the app and redeploy. On Miabi, add it under the app's environment as a <b>secret</b>.</p>
+    </section>
+
+    <section id="view-login" hidden>
+      <form class="card pad center-card" id="loginForm">
+        <h3>Sign in</h3>
+        <p class="hint">Enter the value of the app's <code>ADMIN_TOKEN</code>.</p>
+        <input id="token" type="password" placeholder="Admin token" autocomplete="current-password" required />
+        <button class="primary" type="submit">Sign in</button>
+      </form>
+    </section>
+
+    <section id="view-console" hidden>
+      <nav class="tabs">
+        <a href="#overview" data-tab="overview">Overview</a>
+        <a href="#moderation" data-tab="moderation">Moderation</a>
+        <a href="#settings" data-tab="settings">Settings</a>
+        <a href="#chaos" data-tab="chaos">Chaos lab</a>
+      </nav>
+
+      <div id="tab-overview" data-panel>
+        <div class="tiles">
+          <div class="card tile live"><div class="label">Online now</div><div class="value" id="tOnline">–</div></div>
+          <div class="card tile"><div class="label">Replicas</div><div class="value" id="tReplicas">–</div></div>
+          <div class="card tile"><div class="label">Signatures</div><div class="value" id="tTotal">–</div></div>
+          <div class="card tile"><div class="label">Today</div><div class="value" id="tToday">–</div></div>
+          <div class="card tile"><div class="label">Pinned</div><div class="value" id="tPinned">–</div></div>
+          <div class="card tile"><div class="label">Hidden</div><div class="value" id="tHidden">–</div></div>
+        </div>
+        <div class="stack">
+          <div class="card pad">
+            <h2>Signatures · last 14 days</h2>
+            <div class="chart" id="chart"></div>
+          </div>
+          <div class="grid-2">
+            <div class="card pad">
+              <h2>Replicas</h2>
+              <p class="hint" id="replicaHint"></p>
+              <table>
+                <thead><tr><th>Host</th><th>Version</th><th>Clients</th><th>Seen</th></tr></thead>
+                <tbody id="replicaRows"></tbody>
+              </table>
+            </div>
+            <div class="card pad">
+              <h2>This replica</h2>
+              <dl class="kv" id="runtime"></dl>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-moderation" data-panel hidden>
+        <div class="toolbar">
+          <input type="search" id="q" placeholder="Search name, message or IP…" />
+          <div class="seg" id="statusSeg">
+            <button data-status="" class="on">All</button>
+            <button data-status="visible">Visible</button>
+            <button data-status="hidden">Hidden</button>
+            <button data-status="pinned">Pinned</button>
+          </div>
+          <a class="btn" href="/api/admin/export.csv" download>Export CSV</a>
+        </div>
+        <div class="rows" id="rows"></div>
+        <div class="pager">
+          <button id="prev">← Newer</button>
+          <span class="info" id="pageInfo"></span>
+          <button id="next">Older →</button>
+        </div>
+      </div>
+
+      <div id="tab-settings" data-panel hidden>
+        <form class="card pad" id="settingsForm" style="max-width:640px">
+          <h2>Wall settings</h2>
+          <div class="switch">
+            <div>
+              <h3>Pause signing</h3>
+              <p class="hint" style="margin:0">Make the wall read-only on every replica. Stored in the database and pushed live to every open tab.</p>
+            </div>
+            <label class="toggle"><input type="checkbox" id="paused" /><span></span></label>
+          </div>
+          <label class="field" for="banner">Announcement banner <span id="bannerCount">0 / 200</span></label>
+          <div class="field-row">
+            <input id="banner" maxlength="200" placeholder="e.g. Welcome to the Miabi training 👋" />
+            <button class="primary" type="submit">Save</button>
+          </div>
+        </form>
+      </div>
+
+      <div id="tab-chaos" data-panel hidden>
+        <div class="card pad" id="chaosOff" hidden style="margin-bottom:16px">
+          <h3>Chaos lab is disabled</h3>
+          <p class="hint" style="margin:0">Set <code>DEBUG_ENDPOINTS=true</code> on the app to enable failure injection. The traffic probe below works either way.</p>
+        </div>
+
+        <div class="chaos-grid" id="chaosGrid">
+          <div class="card chaos">
+            <h3>💥 Crash replica</h3>
+            <p>Exit the process with status 1. Miabi's restart policy brings it back.</p>
+            <span class="shows">Shows: restarts · alerts · events</span>
+            <button class="danger" data-chaos="crash">Crash it</button>
+          </div>
+          <div class="card chaos">
+            <h3>🩺 Fail health check</h3>
+            <p>Make <code>/healthz</code> return 503 on the replica that receives this.</p>
+            <span class="shows">Shows: health gating · rollout safety</span>
+            <div class="inputs">
+              <button class="danger" data-chaos="unhealthy" style="flex:1;justify-content:center">Unhealthy</button>
+              <button data-chaos="healthy" style="flex:1;justify-content:center">Healthy</button>
+            </div>
+          </div>
+          <div class="card chaos">
+            <h3>🔥 CPU burn</h3>
+            <p>Saturate every core for a while.</p>
+            <span class="shows">Shows: metrics · resource alerts</span>
+            <div class="inputs"><input id="cpuSec" type="number" min="1" max="120" value="30" title="Seconds" /><button data-chaos="cpu">Burn</button></div>
+          </div>
+          <div class="card chaos">
+            <h3>🧠 Hold memory</h3>
+            <p>Allocate MiB for N seconds. Exceed the memory limit to trigger an OOM restart.</p>
+            <span class="shows">Shows: memory limits · OOM kill</span>
+            <div class="inputs">
+              <input id="memMb" type="number" min="1" max="2048" value="256" title="MiB" />
+              <input id="memSec" type="number" min="1" max="120" value="30" title="Seconds" />
+              <button data-chaos="memory">Hold</button>
+            </div>
+          </div>
+          <div class="card chaos">
+            <h3>📜 Log burst</h3>
+            <p>Write a burst of log lines.</p>
+            <span class="shows">Shows: live logs · search</span>
+            <div class="inputs">
+              <input id="logCount" type="number" min="1" max="1000" value="20" title="Lines" />
+              <select id="logLevel"><option>error</option><option>warn</option><option>info</option></select>
+              <button data-chaos="logs">Write</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card pad" style="margin-bottom:16px">
+          <h2>Traffic probe</h2>
+          <p class="hint">Fire requests from this browser and tally who answered. With replicas you'll see the load spread; during a canary you'll see the traffic split by version.</p>
+          <div class="toolbar" style="margin-bottom:0">
+            <select id="probeTarget">
+              <option value="/api/time">/api/time (fast)</option>
+              <option value="/api/debug/slow?ms=400" data-debug>/api/debug/slow?ms=400 (latency)</option>
+              <option value="/api/debug/error?status=500" data-debug>/api/debug/error (5xx)</option>
+            </select>
+            <input id="probeN" type="number" min="1" max="1000" value="100" style="width:90px" title="Requests" />
+            <input id="probeC" type="number" min="1" max="20" value="6" style="width:70px" title="Concurrency" />
+            <button class="primary" id="probeRun">Run probe</button>
+            <span class="chip" id="probeStat" hidden></span>
+          </div>
+          <div class="probe-bars" id="probeBars"></div>
+        </div>
+
+        <div class="card pad">
+          <h2>Activity</h2>
+          <div class="log" id="log"><div class="t">Actions and their responses appear here.</div></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const PAGE = 15;
+
+    let toastTimer;
+    function toast(msg, err) {
+      const t = $('toast'); t.textContent = msg; t.classList.toggle('err', !!err); t.classList.add('show');
+      clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
+    }
+
+    async function req(method, url, body) {
+      const opts = { method, headers: {}, cache: 'no-store' };
+      if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+      const res = await fetch(url, opts);
+      const data = res.status === 204 ? null : await res.json().catch(() => null);
+      if (res.status === 401) showView('login');
+      return { ok: res.ok, status: res.status, data };
+    }
+
+    function hueFor(s) { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; }
+    function setVersion(v) { const el = $('ver'); el.textContent = 'v' + v; el.style.background = `hsl(${hueFor(v)} 70% 52%)`; }
+    function ago(iso) {
+      const d = (Date.now() - new Date(iso).getTime()) / 1000;
+      if (d < 5) return 'now';
+      if (d < 60) return Math.floor(d) + 's ago';
+      if (d < 3600) return Math.floor(d / 60) + 'm ago';
+      if (d < 86400) return Math.floor(d / 3600) + 'h ago';
+      return new Date(iso).toLocaleDateString();
+    }
+    function uptime(s) {
+      const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+      return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : m ? `${m}m ${s % 60}s` : `${s}s`;
+    }
+
+    // ---- views + tabs ------------------------------------------------------
+    function showView(v) {
+      for (const k of ['disabled', 'login', 'console']) $('view-' + k).hidden = k !== v;
+      $('logout').hidden = v !== 'console';
+      if (v === 'console') { route(); connectSSE(); } else { stopPolling(); }
+    }
+    function currentTab() { const t = location.hash.slice(1); return ['overview', 'moderation', 'settings', 'chaos'].includes(t) ? t : 'overview'; }
+    function route() {
+      const tab = currentTab();
+      document.querySelectorAll('[data-panel]').forEach((p) => { p.hidden = p.id !== 'tab-' + tab; });
+      document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
+      stopPolling();
+      if (tab === 'overview') { loadOverview(); pollTimer = setInterval(loadOverview, 5000); }
+      if (tab === 'moderation') loadRows();
+      if (tab === 'settings') loadSettings();
+      if (tab === 'chaos') loadOverview();
+    }
+    let pollTimer;
+    function stopPolling() { clearInterval(pollTimer); }
+    window.addEventListener('hashchange', () => { if (!$('view-console').hidden) route(); });
+
+    // ---- overview ----------------------------------------------------------
+    let overview = null;
+    async function loadOverview() {
+      const r = await req('GET', '/api/admin/overview');
+      if (!r.ok || !r.data) return;
+      overview = r.data;
+      const { stats, runtime: rt, replicas, online, debug } = overview;
+      $('servedBy').textContent = rt.host;
+      $('appName').textContent = rt.app;
+      setVersion(rt.version);
+      $('tOnline').textContent = online;
+      $('tReplicas').textContent = replicas.length;
+      $('tTotal').textContent = stats.total;
+      $('tToday').textContent = stats.today;
+      $('tPinned').textContent = stats.pinned;
+      $('tHidden').textContent = stats.hidden;
+      renderChart(stats.daily || []);
+
+      $('replicaHint').innerHTML = rt.broker === 'redis'
+        ? 'Presence is shared through Redis, so every replica is listed.'
+        : 'In-process broker: only this replica is visible. Attach Redis (<code>REDIS_URL</code>) to share live updates across replicas.';
+      $('replicaRows').innerHTML = replicas.map((r) => `
+        <tr class="${r.host === rt.host ? 'me' : ''}">
+          <td class="mono">${esc(r.host)}</td>
+          <td><span class="ver" style="background:hsl(${hueFor(r.version)} 70% 52%);font-size:11px;padding:2px 8px">v${esc(r.version)}</span></td>
+          <td>${r.online}</td>
+          <td>${ago(r.seen)}</td>
+        </tr>`).join('');
+
+      const status = (v) => v === 'up' ? '<span class="dot-s ok"></span>up' : v === 'down' ? '<span class="dot-s bad"></span>down' : '<span class="dot-s off"></span>' + esc(v);
+      const kv = [
+        ['Host', esc(rt.host)],
+        ['Version', esc(rt.version)],
+        ['Health', rt.healthy ? '<span class="dot-s ok"></span>healthy' : '<span class="dot-s bad"></span>forced unhealthy'],
+        ['Database', esc(rt.db)],
+        ['Live updates', rt.broker === 'redis' ? 'Redis pub/sub' : 'in-process'],
+        ['Redis', status(rt.redis)],
+        ['Uptime', uptime(rt.uptime_s)],
+        ['Go', `${esc(rt.go)} · ${rt.cpus} CPU`],
+        ['Goroutines', rt.goroutines],
+        ['Heap / Sys', `${rt.heap_mb.toFixed(1)} / ${rt.sys_mb.toFixed(1)} MiB`],
+        ['Debug endpoints', debug ? 'enabled' : 'disabled'],
+      ];
+      $('runtime').innerHTML = kv.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+
+      $('chaosOff').hidden = debug;
+      document.querySelectorAll('[data-chaos]').forEach((b) => { b.disabled = !debug; });
+      document.querySelectorAll('#probeTarget option[data-debug]').forEach((o) => { o.disabled = !debug; });
+    }
+
+    function renderChart(daily) {
+      const maxN = Math.max(1, ...daily.map((d) => d.count));
+      $('chart').innerHTML = daily.map((d, i) => {
+        const pct = Math.round((d.count / maxN) * 100);
+        const day = new Date(d.day + 'T00:00:00Z');
+        const label = day.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+        const show = i % 2 === (daily.length - 1) % 2;
+        return `<div class="bar-col" title="${label}: ${d.count}">
+            <span class="n">${d.count || ''}</span>
+            <div class="bar ${d.count ? '' : 'zero'}" style="height:${d.count ? pct : 0}%"></div>
+            <span class="d">${show ? label : '&nbsp;'}</span>
+          </div>`;
+      }).join('');
+    }
+
+    // ---- moderation --------------------------------------------------------
+    const mod = { status: '', q: '', offset: 0 };
+    async function loadRows() {
+      const qs = new URLSearchParams({ status: mod.status, q: mod.q, limit: PAGE, offset: mod.offset });
+      const r = await req('GET', '/api/admin/entries?' + qs);
+      if (!r.ok) return;
+      const { entries, total } = r.data;
+      if (!entries.length && mod.offset > 0) { mod.offset = Math.max(0, mod.offset - PAGE); return loadRows(); }
+      $('rows').innerHTML = entries.length ? entries.map(rowHTML).join('') : '<div class="empty card">No entries match.</div>';
+      const from = total ? mod.offset + 1 : 0, to = Math.min(mod.offset + PAGE, total);
+      $('pageInfo').textContent = `${from}–${to} of ${total}`;
+      $('prev').disabled = mod.offset === 0;
+      $('next').disabled = mod.offset + PAGE >= total;
+    }
+    function rowHTML(e) {
+      const rep = e.replica ? `<span class="rep" title="Accepted by">${esc(e.replica)}</span>` : '';
+      const ip = e.ip ? `<span class="ip" data-ip="${esc(e.ip)}" title="Submitter IP — click to filter">${esc(e.ip)}</span>` : '';
+      return `<div class="card row ${e.hidden ? 'is-hidden' : ''} ${e.pinned ? 'is-pinned' : ''}" data-id="${e.id}">
+          <div class="head">
+            <span class="who">${esc(e.name)}</span>
+            <span class="when" title="${esc(new Date(e.created_at).toLocaleString())}">${ago(e.created_at)}</span>
+            <span class="id">#${e.id}</span>
+            ${e.pinned ? '<span class="badge pin">Pinned</span>' : ''}
+            ${e.hidden ? '<span class="badge hid">Hidden</span>' : ''}
+            ${ip}
+            ${rep}
+          </div>
+          <div class="acts">
+            <button class="small" data-act="pin">${e.pinned ? 'Unpin' : '📌 Pin'}</button>
+            <button class="small" data-act="hide">${e.hidden ? 'Show' : 'Hide'}</button>
+            <button class="small danger" data-act="delete">Delete</button>
+          </div>
+          <div class="msg">${esc(e.message)}</div>
+        </div>`;
+    }
+    $('rows').addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('button[data-act]');
+      if (!btn) return;
+      const row = btn.closest('.row');
+      const id = row.dataset.id;
+      const act = btn.dataset.act;
+      let r;
+      if (act === 'delete') {
+        if (!confirm(`Delete entry #${id}? It will disappear from every open tab.`)) return;
+        r = await req('DELETE', '/api/admin/entries/' + id);
+      } else {
+        const body = act === 'pin' ? { pinned: !row.classList.contains('is-pinned') } : { hidden: !row.classList.contains('is-hidden') };
+        r = await req('PATCH', '/api/admin/entries/' + id, body);
+      }
+      if (!r.ok) toast((r.data && r.data.error) || 'Action failed', true);
+      loadRows();
+    });
+    $('rows').addEventListener('click', (ev) => {
+      const chip = ev.target.closest('.ip');
+      if (!chip) return;
+      $('q').value = chip.dataset.ip; mod.q = chip.dataset.ip; mod.offset = 0; loadRows();
+    });
+    let searchTimer;
+    $('q').addEventListener('input', (e) => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { mod.q = e.target.value; mod.offset = 0; loadRows(); }, 250); });
+    $('statusSeg').addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      document.querySelectorAll('#statusSeg button').forEach((x) => x.classList.toggle('on', x === b));
+      mod.status = b.dataset.status; mod.offset = 0; loadRows();
+    });
+    $('prev').addEventListener('click', () => { mod.offset = Math.max(0, mod.offset - PAGE); loadRows(); });
+    $('next').addEventListener('click', () => { mod.offset += PAGE; loadRows(); });
+
+    // ---- settings ----------------------------------------------------------
+    async function loadSettings() {
+      const r = await req('GET', '/api/admin/settings');
+      if (!r.ok) return;
+      $('paused').checked = !!r.data.signing_paused;
+      $('banner').value = r.data.banner || '';
+      $('bannerCount').textContent = $('banner').value.length + ' / 200';
+    }
+    async function saveSettings() {
+      const r = await req('PUT', '/api/admin/settings', { signing_paused: $('paused').checked, banner: $('banner').value });
+      toast(r.ok ? 'Settings saved and broadcast' : ((r.data && r.data.error) || 'Could not save'), !r.ok);
+    }
+    $('banner').addEventListener('input', (e) => { $('bannerCount').textContent = e.target.value.length + ' / 200'; });
+    $('paused').addEventListener('change', saveSettings);
+    $('settingsForm').addEventListener('submit', (e) => { e.preventDefault(); saveSettings(); });
+
+    // ---- chaos lab ---------------------------------------------------------
+    function log(msg, kind) {
+      const el = $('log');
+      if (el.querySelector('.t:only-child')) el.innerHTML = '';
+      const line = document.createElement('div');
+      line.innerHTML = `<span class="t">${new Date().toLocaleTimeString()}</span> <span class="${kind || ''}">${esc(msg)}</span>`;
+      el.prepend(line);
+    }
+    const chaos = {
+      crash:     () => ['POST', '/api/debug/crash'],
+      unhealthy: () => ['POST', '/api/debug/health', { healthy: false }],
+      healthy:   () => ['POST', '/api/debug/health', { healthy: true }],
+      cpu:       () => ['POST', `/api/debug/cpu?seconds=${$('cpuSec').value}`],
+      memory:    () => ['POST', `/api/debug/memory?mb=${$('memMb').value}&seconds=${$('memSec').value}`],
+      logs:      () => ['POST', `/api/debug/logs?count=${$('logCount').value}&level=${$('logLevel').value}`],
+    };
+    $('chaosGrid').addEventListener('click', async (e) => {
+      const b = e.target.closest('button[data-chaos]'); if (!b) return;
+      const kind = b.dataset.chaos;
+      if (kind === 'crash' && !confirm('Crash the replica that receives this request?')) return;
+      const [method, url, body] = chaos[kind]();
+      b.disabled = true;
+      try {
+        const r = await req(method, url, body);
+        const d = r.data || {};
+        log(`${method} ${url} → ${r.status}${d.host ? ' from ' + d.host : ''}${d.error ? ' · ' + d.error : ''}`, r.ok ? 's' : 'e');
+        if (kind === 'crash' && r.ok) watchRecovery(d.host);
+      } catch (err) { log(`${method} ${url} → network error`, 'e'); }
+      finally { setTimeout(() => { b.disabled = !(overview && overview.debug); }, 800); }
+      if (kind === 'unhealthy' || kind === 'healthy') loadOverview();
+    });
+
+    // Polls /healthz after a crash and reports when the crashed host (or a
+    // replacement) answers again, which is the restart made visible.
+    async function watchRecovery(crashed) {
+      const start = Date.now();
+      let sawDown = false;
+      log(`watching /healthz for ${crashed} to come back…`, 'w');
+      while (Date.now() - start < 120000) {
+        await new Promise((r) => setTimeout(r, 1000));
+        let status = 0, host = '';
+        try {
+          const res = await fetch('/healthz', { cache: 'no-store' });
+          status = res.status; host = ((await res.json().catch(() => ({}))).host) || '';
+        } catch { status = 0; }
+        const secs = Math.round((Date.now() - start) / 1000);
+        if (status !== 200) { if (!sawDown) log(`healthz → ${status || 'unreachable'} (${secs}s)`, 'e'); sawDown = true; continue; }
+        if (host && host !== crashed) { log(`served by ${host} after ${secs}s — another replica took the traffic`, 's'); return; }
+        if (sawDown || secs > 3) { log(`${host || 'app'} is back after ${secs}s`, 's'); loadOverview(); return; }
+      }
+      log('gave up watching after 120s', 'w');
+    }
+
+    $('probeRun').addEventListener('click', async () => {
+      const url = $('probeTarget').value;
+      const n = Math.min(1000, Math.max(1, +$('probeN').value || 1));
+      const c = Math.min(20, Math.max(1, +$('probeC').value || 1));
+      const tally = new Map();
+      const lat = [];
+      let sent = 0, done = 0;
+      $('probeRun').disabled = true;
+      $('probeStat').hidden = false;
+      const t0 = performance.now();
+      const worker = async () => {
+        while (sent < n) {
+          sent++;
+          const s = performance.now();
+          let key;
+          try {
+            const res = await fetch(url, { cache: 'no-store' });
+            const d = await res.json().catch(() => ({}));
+            key = `${res.status} · v${d.version || '?'} · ${d.host || '?'}`;
+            if (res.status >= 400 && !d.version) key = `${res.status} · ${d.host || '?'}`;
+          } catch { key = 'network error'; }
+          lat.push(performance.now() - s);
+          tally.set(key, (tally.get(key) || 0) + 1);
+          done++;
+          if (done % 5 === 0 || done === n) renderProbe(tally, done, n, lat, t0);
+        }
+      };
+      await Promise.all(Array.from({ length: c }, worker));
+      renderProbe(tally, done, n, lat, t0);
+      log(`probe ${url}: ${n} requests, ${tally.size} distinct responders`, 's');
+      $('probeRun').disabled = false;
+    });
+    function renderProbe(tally, done, n, lat, t0) {
+      const sorted = [...lat].sort((a, b) => a - b);
+      const p = (q) => sorted.length ? Math.round(sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]) : 0;
+      const rps = done / ((performance.now() - t0) / 1000);
+      $('probeStat').textContent = `${done}/${n} · p50 ${p(0.5)}ms · p95 ${p(0.95)}ms · ${rps.toFixed(0)} req/s`;
+      const rows = [...tally.entries()].sort((a, b) => b[1] - a[1]);
+      $('probeBars').innerHTML = rows.map(([k, v]) => {
+        const pct = (v / done) * 100;
+        const color = k.startsWith('2') ? `hsl(${hueFor(k.split(' · ')[1] || k)} 70% 55%)` : 'var(--danger)';
+        return `<div class="pb"><span class="k" title="${esc(k)}">${esc(k)}</span>
+          <div class="track"><div class="fill" style="width:${pct}%;background:${color}"></div></div>
+          <span class="v">${v} · ${pct.toFixed(0)}%</span></div>`;
+      }).join('');
+    }
+
+    // ---- live updates ------------------------------------------------------
+    let es;
+    let refreshTimer;
+    function refreshSoon() {
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        const tab = currentTab();
+        if (tab === 'moderation') loadRows();
+        if (tab === 'overview') loadOverview();
+        if (tab === 'settings') loadSettings();
+      }, 250);
+    }
+    function connectSSE() {
+      if (es) return;
+      es = new EventSource('/api/stream');
+      for (const t of ['created', 'updated', 'deleted', 'settings']) es.addEventListener(t, refreshSoon);
+      es.addEventListener('presence', (e) => { const d = JSON.parse(e.data); $('tOnline').textContent = d.online || 0; if (d.replicas) $('tReplicas').textContent = d.replicas; });
+    }
+
+    // ---- auth --------------------------------------------------------------
+    $('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const r = await req('POST', '/api/admin/login', { token: $('token').value });
+      if (r.ok) { $('token').value = ''; showView('console'); }
+      else toast((r.data && r.data.error) || 'Sign-in failed', true);
+    });
+    $('logout').addEventListener('click', async () => {
+      await req('POST', '/api/admin/logout');
+      if (es) { es.close(); es = null; }
+      showView('login');
+    });
+
+    (async () => {
+      const r = await req('GET', '/api/admin/session');
+      fetch('/api/info', { cache: 'no-store' }).then((x) => x.json()).then((d) => {
+        setVersion(d.version); $('servedBy').textContent = d.host; $('appName').textContent = d.app;
+      }).catch(() => {});
+      if (!r.ok || !r.data) return showView('login');
+      showView(!r.data.enabled ? 'disabled' : r.data.authenticated ? 'console' : 'login');
+    })();
+  </script>
+</body>
+</html>

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,10 +20,53 @@ type Entry struct {
 	ID        uint           `gorm:"primaryKey" json:"id"`
 	Name      string         `gorm:"type:varchar(60);not null" json:"name"`
 	Message   string         `gorm:"type:varchar(500);not null" json:"message"`
+	Pinned    bool           `gorm:"not null;default:false;index" json:"pinned"`
+	Hidden    bool           `gorm:"not null;default:false;index" json:"hidden"`
+	Replica   string         `gorm:"type:varchar(128)" json:"replica,omitempty"`
+	IP        string         `gorm:"type:varchar(64)" json:"-"`
 	CreatedAt time.Time      `gorm:"index" json:"created_at"`
 	UpdatedAt time.Time      `json:"-"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
+
+// Setting is a key/value row holding app-wide state shared by all replicas.
+type Setting struct {
+	Key       string `gorm:"primaryKey;type:varchar(64)"`
+	Value     string `gorm:"type:text;not null"`
+	UpdatedAt time.Time
+}
+
+// Settings is the moderator-controlled state of the wall.
+type Settings struct {
+	SigningPaused bool   `json:"signing_paused"`
+	Banner        string `json:"banner"`
+}
+
+// EntryFilter selects entries for the admin console.
+type EntryFilter struct {
+	Status string // "", "visible", "hidden" or "pinned"
+	Query  string
+	Limit  int
+	Offset int
+}
+
+// DayCount is the number of signatures created on a given UTC day.
+type DayCount struct {
+	Day   string `json:"day"`
+	Count int    `json:"count"`
+}
+
+// Stats summarises the wall for the admin overview.
+type Stats struct {
+	Total   int64      `json:"total"`
+	Visible int64      `json:"visible"`
+	Hidden  int64      `json:"hidden"`
+	Pinned  int64      `json:"pinned"`
+	Today   int64      `json:"today"`
+	Daily   []DayCount `json:"daily"`
+}
+
+const settingsKey = "settings"
 
 type Store struct {
 	db *gorm.DB
@@ -92,11 +136,15 @@ func (s *Store) Ping(ctx context.Context) error {
 	return sqlDB.PingContext(ctx)
 }
 
+// Migrate applies the schema under the same lock as seeding, since
+// concurrent AutoMigrate calls race on Postgres catalog inserts.
 func (s *Store) Migrate() error {
-	return s.db.AutoMigrate(&Entry{})
+	return s.Exclusive(context.Background(), func(tx *Store) error {
+		return tx.db.AutoMigrate(&Entry{}, &Setting{})
+	})
 }
 
-// List returns entries newest first, with limit/offset pagination.
+// List returns the public wall: visible entries, pinned first, then newest.
 func (s *Store) List(ctx context.Context, limit, offset int) ([]Entry, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
@@ -106,6 +154,8 @@ func (s *Store) List(ctx context.Context, limit, offset int) ([]Entry, error) {
 	}
 	var entries []Entry
 	err := s.db.WithContext(ctx).
+		Where("hidden = ?", false).
+		Order("pinned DESC").
 		Order("created_at DESC").
 		Limit(limit).
 		Offset(offset).
@@ -114,8 +164,8 @@ func (s *Store) List(ctx context.Context, limit, offset int) ([]Entry, error) {
 }
 
 // Create inserts a new entry and returns it with its generated id/timestamp.
-func (s *Store) Create(ctx context.Context, name, message string) (Entry, error) {
-	e := Entry{Name: name, Message: message}
+func (s *Store) Create(ctx context.Context, name, message, replica, ip string) (Entry, error) {
+	e := Entry{Name: name, Message: message, Replica: replica, IP: ip}
 	err := s.db.WithContext(ctx).Create(&e).Error
 	return e, err
 }
@@ -126,9 +176,169 @@ func (s *Store) Delete(ctx context.Context, id uint64) (bool, error) {
 	return res.RowsAffected > 0, res.Error
 }
 
-// Count returns the total number of (non-deleted) entries.
+// schemaLockID is an arbitrary Postgres advisory-lock key.
+const schemaLockID = 7_406_381
+
+// Exclusive runs fn in a transaction holding a Postgres advisory lock, so
+// replicas booting together migrate and seed one at a time.
+func (s *Store) Exclusive(ctx context.Context, fn func(tx *Store) error) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if tx.Name() == "postgres" {
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", schemaLockID).Error; err != nil {
+				return err
+			}
+		}
+		return fn(&Store{db: tx})
+	})
+}
+
+// Count returns the total number of (non-deleted) entries, hidden included.
 func (s *Store) Count(ctx context.Context) (int64, error) {
 	var n int64
 	err := s.db.WithContext(ctx).Model(&Entry{}).Count(&n).Error
 	return n, err
+}
+
+// CountVisible returns the number of entries shown on the public wall.
+func (s *Store) CountVisible(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Model(&Entry{}).Where("hidden = ?", false).Count(&n).Error
+	return n, err
+}
+
+// Get returns a single entry by id.
+func (s *Store) Get(ctx context.Context, id uint64) (Entry, error) {
+	var e Entry
+	err := s.db.WithContext(ctx).First(&e, id).Error
+	return e, err
+}
+
+// AdminList returns entries matching f, newest first, and the match count.
+func (s *Store) AdminList(ctx context.Context, f EntryFilter) ([]Entry, int64, error) {
+	q := s.db.WithContext(ctx).Model(&Entry{})
+	switch f.Status {
+	case "visible":
+		q = q.Where("hidden = ?", false)
+	case "hidden":
+		q = q.Where("hidden = ?", true)
+	case "pinned":
+		q = q.Where("pinned = ?", true)
+	}
+	if term := strings.TrimSpace(f.Query); term != "" {
+		like := "%" + strings.ToLower(term) + "%"
+		q = q.Where("LOWER(name) LIKE ? OR LOWER(message) LIKE ? OR ip LIKE ?", like, like, like)
+	}
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var entries []Entry
+	err := q.Order("created_at DESC").Limit(f.Limit).Offset(f.Offset).Find(&entries).Error
+	return entries, total, err
+}
+
+// SetFlags updates the moderation flags that are non-nil and returns the entry.
+func (s *Store) SetFlags(ctx context.Context, id uint64, pinned, hidden *bool) (Entry, error) {
+	updates := map[string]any{}
+	if pinned != nil {
+		updates["pinned"] = *pinned
+	}
+	if hidden != nil {
+		updates["hidden"] = *hidden
+	}
+	e, err := s.Get(ctx, id)
+	if err != nil || len(updates) == 0 {
+		return e, err
+	}
+	if err := s.db.WithContext(ctx).Model(&e).Updates(updates).Error; err != nil {
+		return e, err
+	}
+	return s.Get(ctx, id)
+}
+
+// All returns every entry, oldest first, for export.
+func (s *Store) All(ctx context.Context) ([]Entry, error) {
+	var entries []Entry
+	err := s.db.WithContext(ctx).Order("created_at ASC").Find(&entries).Error
+	return entries, err
+}
+
+// Stats computes the admin overview, including per-day counts for the last
+// `days` days. Bucketing happens in Go so it works the same on both drivers.
+func (s *Store) Stats(ctx context.Context, days int) (Stats, error) {
+	var st Stats
+	db := s.db.WithContext(ctx).Model(&Entry{})
+	if err := db.Count(&st.Total).Error; err != nil {
+		return st, err
+	}
+	s.db.WithContext(ctx).Model(&Entry{}).Where("hidden = ?", true).Count(&st.Hidden)
+	s.db.WithContext(ctx).Model(&Entry{}).Where("pinned = ?", true).Count(&st.Pinned)
+	st.Visible = st.Total - st.Hidden
+
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	since := today.AddDate(0, 0, -(days - 1))
+
+	var stamps []time.Time
+	if err := s.db.WithContext(ctx).Model(&Entry{}).
+		Where("created_at >= ?", since).
+		Pluck("created_at", &stamps).Error; err != nil {
+		return st, err
+	}
+	buckets := make(map[string]int, days)
+	for _, t := range stamps {
+		buckets[t.UTC().Format("2006-01-02")]++
+	}
+	for d := since; !d.After(today); d = d.AddDate(0, 0, 1) {
+		key := d.Format("2006-01-02")
+		st.Daily = append(st.Daily, DayCount{Day: key, Count: buckets[key]})
+	}
+	st.Today = int64(buckets[today.Format("2006-01-02")])
+	return st, nil
+}
+
+// Settings loads the shared wall settings, returning defaults when unset.
+func (s *Store) Settings(ctx context.Context) (Settings, error) {
+	var row Setting
+	var st Settings
+	err := s.db.WithContext(ctx).Where(&Setting{Key: settingsKey}).Limit(1).Find(&row).Error
+	if err != nil || row.Value == "" {
+		return st, err
+	}
+	err = json.Unmarshal([]byte(row.Value), &st)
+	return st, err
+}
+
+// SaveSettings persists the shared wall settings.
+func (s *Store) SaveSettings(ctx context.Context, st Settings) error {
+	payload, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	return s.db.WithContext(ctx).Save(&Setting{Key: settingsKey, Value: string(payload)}).Error
+}
+
+// Purge permanently removes entries soft-deleted before cutoff.
+func (s *Store) Purge(ctx context.Context, cutoff time.Time, dryRun bool) (int64, error) {
+	q := s.db.WithContext(ctx).Unscoped().Where("deleted_at IS NOT NULL AND deleted_at < ?", cutoff)
+	if dryRun {
+		var n int64
+		err := q.Model(&Entry{}).Count(&n).Error
+		return n, err
+	}
+	res := q.Delete(&Entry{})
+	return res.RowsAffected, res.Error
+}
+
+// Expire soft-deletes unpinned entries created before cutoff.
+func (s *Store) Expire(ctx context.Context, cutoff time.Time, dryRun bool) (int64, error) {
+	q := s.db.WithContext(ctx).Where("pinned = ? AND created_at < ?", false, cutoff)
+	if dryRun {
+		var n int64
+		err := q.Model(&Entry{}).Count(&n).Error
+		return n, err
+	}
+	res := q.Delete(&Entry{})
+	return res.RowsAffected, res.Error
 }
