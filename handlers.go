@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -206,8 +207,13 @@ func (h *Handler) Stream(c *okapi.Context) error {
 		}
 	}()
 
-	return c.SSEStreamWithOptions(ctx, msgs, &okapi.StreamOptions{
+	err := c.SSEStreamWithOptions(ctx, msgs, &okapi.StreamOptions{
 		Serializer:   &okapi.JSONSerializer{},
 		PingInterval: 25 * time.Second,
 	})
+	// A client closing the stream is how every SSE session ends, not a failure.
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }
