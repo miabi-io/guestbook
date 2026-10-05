@@ -219,6 +219,7 @@
           <div class="card tile"><div class="label">Replicas</div><div class="value" id="tReplicas">–</div></div>
           <div class="card tile"><div class="label">Signatures</div><div class="value" id="tTotal">–</div></div>
           <div class="card tile"><div class="label">Today</div><div class="value" id="tToday">–</div></div>
+          <div class="card tile"><div class="label">Reactions</div><div class="value" id="tReacts">–</div></div>
           <div class="card tile"><div class="label">Pinned</div><div class="value" id="tPinned">–</div></div>
           <div class="card tile"><div class="label">Hidden</div><div class="value" id="tHidden">–</div></div>
         </div>
@@ -232,7 +233,7 @@
               <h2>Replicas</h2>
               <p class="hint" id="replicaHint"></p>
               <table>
-                <thead><tr><th>Host</th><th>Version</th><th>Clients</th><th>Seen</th></tr></thead>
+                <thead><tr><th>Host</th><th>Version</th><th>Clients</th><th title="HTTP requests answered since this replica started — a rollout resets them one at a time">Requests</th><th>Seen</th></tr></thead>
                 <tbody id="replicaRows"></tbody>
               </table>
             </div>
@@ -278,6 +279,15 @@
             <input id="banner" maxlength="200" placeholder="e.g. Welcome to the Miabi training 👋" />
             <button class="primary" type="submit">Save</button>
           </div>
+          <label class="field" for="theme" style="margin-top:16px">Wall theme</label>
+          <div class="field-row">
+            <select id="theme">
+              <option value="system">System — follow each visitor's preference</option>
+              <option value="light">Force light</option>
+              <option value="dark">Force dark</option>
+            </select>
+          </div>
+          <p class="hint" style="margin:8px 0 0">Pushed live to every open tab. Visitors can toggle light/dark themselves unless you force one here.</p>
         </form>
       </div>
 
@@ -346,6 +356,15 @@
             <span class="chip" id="probeStat" hidden></span>
           </div>
           <div class="probe-bars" id="probeBars"></div>
+        </div>
+
+        <div class="card pad" style="margin-bottom:16px">
+          <h2>Rolling-update wave</h2>
+          <p class="hint">Watch what Miabi does during a <b>rolling update</b>: this tool bounces <i>one replica at a time</i> with the chaos endpoint while polling the replica table. Each restarted replica comes back with its request counter reset and, during a canary, a new version. Needs debug endpoints; run it with Redis attached so every replica is listed.</p>
+          <div class="toolbar" style="margin-bottom:0">
+            <button class="primary" id="waveRun">Bounce each replica, one at a time</button>
+            <span class="chip" id="waveStat" hidden></span>
+          </div>
         </div>
 
         <div class="card pad">
@@ -421,6 +440,7 @@
       if (!r.ok || !r.data) return;
       overview = r.data;
       const { stats, runtime: rt, replicas, online, debug } = overview;
+      $('waveRun').disabled = !debug;
       $('servedBy').textContent = rt.host;
       $('appName').textContent = rt.app;
       setVersion(rt.version);
@@ -428,18 +448,20 @@
       $('tReplicas').textContent = replicas.length;
       $('tTotal').textContent = stats.total;
       $('tToday').textContent = stats.today;
+      $('tReacts').textContent = stats.reactions ?? 0;
       $('tPinned').textContent = stats.pinned;
       $('tHidden').textContent = stats.hidden;
       renderChart(stats.daily || []);
 
       $('replicaHint').innerHTML = rt.broker === 'redis'
-        ? 'Presence is shared through Redis, so every replica is listed.'
+        ? 'Presence is shared through Redis, so every replica is listed. The requests counter grows per replica and resets when a rollout replaces it.'
         : 'In-process broker: only this replica is visible. Attach Redis (<code>REDIS_URL</code>) to share live updates across replicas.';
       $('replicaRows').innerHTML = replicas.map((r) => `
         <tr class="${r.host === rt.host ? 'me' : ''}">
           <td class="mono">${esc(r.host)}</td>
           <td><span class="ver" style="background:hsl(${hueFor(r.version)} 70% 52%);font-size:11px;padding:2px 8px">v${esc(r.version)}</span></td>
           <td>${r.online}</td>
+          <td>${r.requests ?? '–'}</td>
           <td>${ago(r.seen)}</td>
         </tr>`).join('');
 
@@ -452,6 +474,7 @@
         ['Live updates', rt.broker === 'redis' ? 'Redis pub/sub' : 'in-process'],
         ['Redis', status(rt.redis)],
         ['Uptime', uptime(rt.uptime_s)],
+        ['Requests served', rt.requests ?? 0],
         ['Go', `${esc(rt.go)} · ${rt.cpus} CPU`],
         ['Goroutines', rt.goroutines],
         ['Heap / Sys', `${rt.heap_mb.toFixed(1)} / ${rt.sys_mb.toFixed(1)} MiB`],
@@ -496,6 +519,8 @@
     function rowHTML(e) {
       const rep = e.replica ? `<span class="rep" title="Accepted by">${esc(e.replica)}</span>` : '';
       const ip = e.ip ? `<span class="ip" data-ip="${esc(e.ip)}" title="Submitter IP — click to filter">${esc(e.ip)}</span>` : '';
+      const reacts = Object.entries(e.reactions || {}).map(([k, n]) => `${({ heart: '❤️', tada: '🎉', thumbsup: '👍', smile: '😄' })[k] || k} ${n}`).join(' · ');
+      const reactsChip = reacts ? `<span class="rep" title="Reactions">${esc(reacts)}</span>` : '';
       return `<div class="card row ${e.hidden ? 'is-hidden' : ''} ${e.pinned ? 'is-pinned' : ''}" data-id="${e.id}">
           <div class="head">
             <span class="who">${esc(e.name)}</span>
@@ -503,6 +528,7 @@
             <span class="id">#${e.id}</span>
             ${e.pinned ? '<span class="badge pin">Pinned</span>' : ''}
             ${e.hidden ? '<span class="badge hid">Hidden</span>' : ''}
+            ${reactsChip}
             ${ip}
             ${rep}
           </div>
@@ -552,14 +578,16 @@
       if (!r.ok) return;
       $('paused').checked = !!r.data.signing_paused;
       $('banner').value = r.data.banner || '';
+      $('theme').value = r.data.theme || 'system';
       $('bannerCount').textContent = $('banner').value.length + ' / 200';
     }
     async function saveSettings() {
-      const r = await req('PUT', '/api/admin/settings', { signing_paused: $('paused').checked, banner: $('banner').value });
+      const r = await req('PUT', '/api/admin/settings', { signing_paused: $('paused').checked, banner: $('banner').value, theme: $('theme').value });
       toast(r.ok ? 'Settings saved and broadcast' : ((r.data && r.data.error) || 'Could not save'), !r.ok);
     }
     $('banner').addEventListener('input', (e) => { $('bannerCount').textContent = e.target.value.length + ' / 200'; });
     $('paused').addEventListener('change', saveSettings);
+    $('theme').addEventListener('change', saveSettings);
     $('settingsForm').addEventListener('submit', (e) => { e.preventDefault(); saveSettings(); });
 
     // ---- chaos lab ---------------------------------------------------------
@@ -614,6 +642,65 @@
       }
       log('gave up watching after 120s', 'w');
     }
+
+    // ---- rolling-update wave -----------------------------------------------
+    // Crashes replicas one at a time and waits for each to rejoin (its request
+    // counter restarts from ~0), mimicking — and explaining — what the platform
+    // does during a rolling update. Self-healing does the rest.
+    function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+    async function fetchOverviewQuiet() {
+      try {
+        const res = await fetch('/api/admin/overview', { cache: 'no-store' });
+        return res.ok ? await res.json() : null;
+      } catch { return null; }
+    }
+    $('waveRun').addEventListener('click', async () => {
+      if (!overview || !overview.debug) return;
+      if (!confirm('Restart every replica, one at a time, using the crash endpoint? The app self-heals — this is what a rolling update looks like from the inside.')) return;
+      $('waveRun').disabled = true;
+      $('waveStat').hidden = false;
+      try {
+        // Snapshot the fleet (in local mode this is just the answering replica).
+        const first = await fetchOverviewQuiet();
+        const targets = [...new Set((first ? first.replicas : []).map((r) => r.host))];
+        if (!targets.length) targets.push((first && first.runtime.host) || '');
+        let bounced = 0, hops = 0;
+        while (bounced < targets.length && hops < targets.length * 3 + 3) {
+          hops++;
+          const ov = await fetchOverviewQuiet();
+          if (!ov) { await sleep(1500); continue; }
+          const host = ov.runtime.host;
+          const idx = targets.indexOf(host);
+          if (idx < 0) { // already-bounced or unknown replica answered: keep hunting
+            $('waveStat').textContent = `looking for ${targets[bounced]}… (at ${host})`;
+            await req('POST', '/api/debug/crash'); // bounce it too, then move on
+            await sleep(4000);
+            continue;
+          }
+          targets.splice(idx, 1);
+          $('waveStat').textContent = `wave ${bounced + 1} → bouncing ${host}`;
+          log(`wave ${bounced + 1}: crashing ${host} (served ${ov.runtime.requests ?? '?'} requests since boot)`, 'w');
+          await req('POST', '/api/debug/crash');
+          // Wait until a *different* replica (or the same name with a fresh
+          // counter) answers again — that is the restart made visible.
+          const deadline = Date.now() + 90000;
+          let back = false;
+          while (Date.now() < deadline) {
+            await sleep(1500);
+            const cur = await fetchOverviewQuiet();
+            if (!cur) continue;
+            if (cur.runtime.host !== host || (cur.runtime.requests ?? 0) < (ov.runtime.requests ?? 0)) { back = true; break; }
+          }
+          log(back ? `${host} is back (request counter reset)` : `${host} did not come back within 90s`, back ? 's' : 'e');
+          bounced++;
+        }
+        $('waveStat').textContent = `wave done — ${bounced} replica${bounced === 1 ? '' : 's'} bounced`;
+        log(`rolling wave finished: ${bounced} replica(s) bounced, app stayed up`, 's');
+      } finally {
+        $('waveRun').disabled = !(overview && overview.debug);
+        loadOverview();
+      }
+    });
 
     $('probeRun').addEventListener('click', async () => {
       const url = $('probeTarget').value;

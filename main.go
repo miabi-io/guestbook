@@ -85,7 +85,7 @@ func runServer(cmd *okapicli.Command, cfg Config) error {
 	}
 
 	host, _ := os.Hostname()
-	broker := NewBroker(host, cfg.Version)
+	broker := NewBroker(host, cfg.Version, nil)
 	if cfg.RedisURL != "" {
 		if err := broker.UseRedis(cfg.RedisURL); err != nil {
 			return err
@@ -106,6 +106,7 @@ func runServer(cmd *okapicli.Command, cfg Config) error {
 		debug:    cfg.DebugEndpoints,
 		started:  time.Now(),
 	}
+	broker.requests = h.requests.Load
 	if !h.auth.Enabled() {
 		logger.Warn("admin console disabled: set ADMIN_TOKEN to enable /admin")
 	}
@@ -116,7 +117,7 @@ func runServer(cmd *okapicli.Command, cfg Config) error {
 	app := cmd.Okapi()
 	app.WithPort(cmd.GetInt("port"))
 	app.WithDebug()
-	app.Use(okapi.LoggerMiddleware, okapi.RequestID())
+	app.Use(okapi.LoggerMiddleware, okapi.RequestID(), h.countRequests)
 	registerRoutes(app, h)
 
 	return cmd.CLI().RunServer(&okapicli.RunOptions{
@@ -144,6 +145,8 @@ func registerRoutes(app *okapi.Okapi, h *Handler) {
 	api.Get("/settings", h.PublicSettings)
 	api.Get("/entries", h.ListEntries)
 	api.Post("/entries", h.CreateEntry)
+	api.Post("/entries/{id:int}/reactions", h.React)
+	api.Delete("/entries/{id:int}/reactions", h.Unreact)
 	api.Get("/stream", h.Stream)
 
 	api.Get("/admin/session", h.AdminSession)
@@ -174,6 +177,12 @@ func registerRoutes(app *okapi.Okapi, h *Handler) {
 	}
 	app.Get("/admin", func(c *okapi.Context) error {
 		return c.Data(http.StatusOK, "text/html; charset=utf-8", adminPage)
+	})
+
+	// Browsers ask for /favicon.ico on their own; the logo serves as the icon.
+	app.Get("/favicon.ico", func(c *okapi.Context) error {
+		c.Redirect(http.StatusFound, "/badges/icon.svg")
+		return nil
 	})
 
 	// Okapi serves real files directly and falls back to index.html for any

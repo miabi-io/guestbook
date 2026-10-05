@@ -13,6 +13,7 @@ import (
 	"github.com/jkaninda/logger"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Entry is a single signature on the guestbook wall.
@@ -27,6 +28,21 @@ type Entry struct {
 	CreatedAt time.Time      `gorm:"index" json:"created_at"`
 	UpdatedAt time.Time      `json:"-"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+
+	// Reactions carries the per-emoji tally (e.g. {"heart":3,"tada":1}); it is
+	// filled by list endpoints, never stored on the entries table itself.
+	Reactions map[string]int `gorm:"-" json:"reactions,omitempty"`
+}
+
+// Reaction is one emoji reaction to an entry. Visitors react and un-react
+// without an account, so a short-lived cookie ("who") prevents the same
+// browser from inflating the count.
+type Reaction struct {
+	EntryID   uint           `gorm:"primaryKey;autoIncrement:false" json:"-"`
+	Emoji     string         `gorm:"primaryKey;type:varchar(16)" json:"-"`
+	Who       string         `gorm:"primaryKey;type:varchar(64)" json:"-"`
+	CreatedAt time.Time      `json:"-"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 // Setting is a key/value row holding app-wide state shared by all replicas.
@@ -40,6 +56,9 @@ type Setting struct {
 type Settings struct {
 	SigningPaused bool   `json:"signing_paused"`
 	Banner        string `json:"banner"`
+	// Theme is the wall appearance forced by a moderator: "" (or "system"),
+	// "light" or "dark". Visitors can still override it locally.
+	Theme string `json:"theme"`
 }
 
 // EntryFilter selects entries for the admin console.
@@ -56,14 +75,31 @@ type DayCount struct {
 	Count int    `json:"count"`
 }
 
+// Emojis a visitor can react with; also the whitelist for the API.
+var reactionEmojis = []string{"heart", "tada", "thumbsup", "smile"}
+
+// ReactionEmojis returns the whitelist, for the info endpoint.
+func ReactionEmojis() []string { return reactionEmojis }
+
+// validReaction reports whether emoji is on the whitelist.
+func validReaction(emoji string) bool {
+	for _, e := range reactionEmojis {
+		if e == emoji {
+			return true
+		}
+	}
+	return false
+}
+
 // Stats summarises the wall for the admin overview.
 type Stats struct {
-	Total   int64      `json:"total"`
-	Visible int64      `json:"visible"`
-	Hidden  int64      `json:"hidden"`
-	Pinned  int64      `json:"pinned"`
-	Today   int64      `json:"today"`
-	Daily   []DayCount `json:"daily"`
+	Total     int64      `json:"total"`
+	Visible   int64      `json:"visible"`
+	Hidden    int64      `json:"hidden"`
+	Pinned    int64      `json:"pinned"`
+	Today     int64      `json:"today"`
+	Reactions int64      `json:"reactions"`
+	Daily     []DayCount `json:"daily"`
 }
 
 const settingsKey = "settings"
@@ -140,7 +176,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // concurrent AutoMigrate calls race on Postgres catalog inserts.
 func (s *Store) Migrate() error {
 	return s.Exclusive(context.Background(), func(tx *Store) error {
-		return tx.db.AutoMigrate(&Entry{}, &Setting{})
+		return tx.db.AutoMigrate(&Entry{}, &Setting{}, &Reaction{})
 	})
 }
 
@@ -160,7 +196,10 @@ func (s *Store) List(ctx context.Context, limit, offset int) ([]Entry, error) {
 		Limit(limit).
 		Offset(offset).
 		Find(&entries).Error
-	return entries, err
+	if err != nil {
+		return nil, err
+	}
+	return entries, s.loadReactions(ctx, entries)
 }
 
 // Create inserts a new entry and returns it with its generated id/timestamp.
@@ -168,6 +207,96 @@ func (s *Store) Create(ctx context.Context, name, message, replica, ip string) (
 	e := Entry{Name: name, Message: message, Replica: replica, IP: ip}
 	err := s.db.WithContext(ctx).Create(&e).Error
 	return e, err
+}
+
+// loadReactions fills the Reactions map of every entry in one grouped query.
+func (s *Store) loadReactions(ctx context.Context, entries []Entry) error {
+	ids := make([]uint, len(entries))
+	for i, e := range entries {
+		ids[i] = e.ID
+		entries[i].Reactions = map[string]int{}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var rows []struct {
+		EntryID uint
+		Emoji   string
+		N       int
+	}
+	if err := s.db.WithContext(ctx).Model(&Reaction{}).
+		Select("entry_id, emoji, count(*) AS n").
+		Where("entry_id IN ?", ids).
+		Group("entry_id, emoji").
+		Scan(&rows).Error; err != nil {
+		return err
+	}
+	byID := make(map[uint]int, len(entries))
+	for i, e := range entries {
+		byID[e.ID] = i
+	}
+	for _, r := range rows {
+		if i, ok := byID[r.EntryID]; ok {
+			entries[i].Reactions[r.Emoji] = r.N
+		}
+	}
+	return nil
+}
+
+// React registers a reaction and returns the emoji's new total for the entry.
+// It is idempotent for a given (entry, emoji, who): reacting twice is a no-op.
+func (s *Store) React(ctx context.Context, entryID uint64, emoji, who string) (int, error) {
+	err := s.db.WithContext(ctx).
+		Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&Reaction{EntryID: uint(entryID), Emoji: emoji, Who: who}).Error
+	if err != nil {
+		return 0, err
+	}
+	return s.reactionTotal(ctx, entryID, emoji)
+}
+
+// Unreact removes a reaction (idempotent) and returns the emoji's new total.
+func (s *Store) Unreact(ctx context.Context, entryID uint64, emoji, who string) (int, error) {
+	err := s.db.WithContext(ctx).
+		Where("entry_id = ? AND emoji = ? AND who = ?", entryID, emoji, who).
+		Delete(&Reaction{}).Error
+	if err != nil {
+		return 0, err
+	}
+	return s.reactionTotal(ctx, entryID, emoji)
+}
+
+func (s *Store) reactionTotal(ctx context.Context, entryID uint64, emoji string) (int, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Model(&Reaction{}).
+		Where("entry_id = ? AND emoji = ?", entryID, emoji).
+		Count(&n).Error
+	return int(n), err
+}
+
+// ReactionCounts returns the per-emoji tally for one entry.
+func (s *Store) ReactionCounts(ctx context.Context, entryID uint64) (map[string]int, error) {
+	out := map[string]int{}
+	var rows []struct {
+		Emoji string
+		N     int
+	}
+	err := s.db.WithContext(ctx).Model(&Reaction{}).
+		Select("emoji, count(*) AS n").
+		Where("entry_id = ?", entryID).
+		Group("emoji").
+		Scan(&rows).Error
+	for _, r := range rows {
+		out[r.Emoji] = r.N
+	}
+	return out, err
+}
+
+// ReactionTotals returns the total number of reactions across the wall.
+func (s *Store) ReactionTotals(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Model(&Reaction{}).Count(&n).Error
+	return n, err
 }
 
 // Delete soft-deletes an entry by id. Returns true when a row was affected.
@@ -206,10 +335,14 @@ func (s *Store) CountVisible(ctx context.Context) (int64, error) {
 	return n, err
 }
 
-// Get returns a single entry by id.
+// Get returns a single entry by id, with its reaction counts.
 func (s *Store) Get(ctx context.Context, id uint64) (Entry, error) {
 	var e Entry
 	err := s.db.WithContext(ctx).First(&e, id).Error
+	if err != nil {
+		return e, err
+	}
+	e.Reactions, err = s.ReactionCounts(ctx, id)
 	return e, err
 }
 
@@ -235,7 +368,10 @@ func (s *Store) AdminList(ctx context.Context, f EntryFilter) ([]Entry, int64, e
 	}
 	var entries []Entry
 	err := q.Order("created_at DESC").Limit(f.Limit).Offset(f.Offset).Find(&entries).Error
-	return entries, total, err
+	if err != nil {
+		return nil, 0, err
+	}
+	return entries, total, s.loadReactions(ctx, entries)
 }
 
 // SetFlags updates the moderation flags that are non-nil and returns the entry.
@@ -274,6 +410,7 @@ func (s *Store) Stats(ctx context.Context, days int) (Stats, error) {
 	}
 	s.db.WithContext(ctx).Model(&Entry{}).Where("hidden = ?", true).Count(&st.Hidden)
 	s.db.WithContext(ctx).Model(&Entry{}).Where("pinned = ?", true).Count(&st.Pinned)
+	s.db.WithContext(ctx).Model(&Reaction{}).Count(&st.Reactions)
 	st.Visible = st.Total - st.Hidden
 
 	now := time.Now().UTC()

@@ -5,8 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Miabi Guestbook</title>
   <meta name="description" content="A tiny Okapi + Postgres example app, deployed on Miabi." />
+  <meta name="theme-color" content="#0b0a12" />
+  <link rel="icon" href="/badges/icon.svg" type="image/svg+xml" />
   <style>
-    :root {
+    /* Dark is the default look; body.light switches to the light palette.
+       The moderator can also force one for everyone (wall setting "theme"). */
+    :root, body:not(.light) {
+      color-scheme: dark;
       --bg: #0b0a12;
       --bg-2: #12101d;
       --card: rgba(255, 255, 255, 0.04);
@@ -17,8 +22,30 @@
       --accent-2: #a855f7;
       --danger: #f43f5e;
       --online: #22c55e;
+      --input-bg: rgba(0, 0, 0, 0.25);
+      --via-bg: rgba(0, 0, 0, 0.2);
+      --glow-a: rgba(139, 92, 246, 0.18);
+      --glow-b: rgba(168, 85, 247, 0.14);
       --radius: 16px;
       --shadow: 0 20px 60px -20px rgba(139, 92, 246, 0.35);
+    }
+    body.light {
+      color-scheme: light;
+      --bg: #f4f2fb;
+      --bg-2: #e9e5f7;
+      --card: rgba(255, 255, 255, 0.72);
+      --card-border: rgba(15, 10, 40, 0.1);
+      --text: #221c3d;
+      --muted: #645e7d;
+      --accent: #7c3aed;
+      --accent-2: #9333ea;
+      --danger: #e11d48;
+      --online: #16a34a;
+      --input-bg: rgba(255, 255, 255, 0.8);
+      --via-bg: rgba(124, 58, 237, 0.08);
+      --glow-a: rgba(139, 92, 246, 0.22);
+      --glow-b: rgba(168, 85, 247, 0.16);
+      --shadow: 0 20px 50px -24px rgba(124, 58, 237, 0.35);
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; }
@@ -27,8 +54,8 @@
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       color: var(--text);
       background:
-        radial-gradient(900px 500px at 15% -10%, rgba(139, 92, 246, 0.18), transparent 60%),
-        radial-gradient(700px 500px at 110% 10%, rgba(168, 85, 247, 0.14), transparent 55%),
+        radial-gradient(900px 500px at 15% -10%, var(--glow-a), transparent 60%),
+        radial-gradient(700px 500px at 110% 10%, var(--glow-b), transparent 55%),
         linear-gradient(180deg, var(--bg), var(--bg-2));
       background-attachment: fixed;
       -webkit-font-smoothing: antialiased;
@@ -59,6 +86,14 @@
       background: var(--online); opacity: .5; animation: ping 1.6s cubic-bezier(0,0,.2,1) infinite;
     }
     @keyframes ping { 0% { transform: scale(1); opacity: .5; } 75%, 100% { transform: scale(2.4); opacity: 0; } }
+    .icon-btn {
+      font: inherit; font-size: 14px; line-height: 1; cursor: pointer; color: var(--text);
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 30px; height: 30px; border-radius: 999px;
+      background: var(--card); border: 1px solid var(--card-border);
+      transition: border-color .15s, transform .15s;
+    }
+    .icon-btn:hover { border-color: var(--accent); transform: translateY(-1px); }
 
     header { text-align: center; margin-bottom: 26px; }
     h1 {
@@ -100,7 +135,7 @@
     .row { display: flex; gap: 12px; flex-wrap: wrap; }
     input, textarea {
       width: 100%; font: inherit; color: var(--text);
-      background: rgba(0, 0, 0, 0.25); border: 1px solid var(--card-border);
+      background: var(--input-bg); border: 1px solid var(--card-border);
       border-radius: 12px; padding: 13px 15px; outline: none; resize: vertical;
       transition: border-color .15s, box-shadow .15s;
     }
@@ -145,7 +180,7 @@
     .entry .when { color: var(--muted); }
     .entry .via {
       margin-left: auto; font-size: 11.5px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      background: rgba(0,0,0,.2); border: 1px solid var(--card-border); padding: 2px 8px; border-radius: 999px;
+      background: var(--via-bg); border: 1px solid var(--card-border); padding: 2px 8px; border-radius: 999px;
       max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     li.entry.pinned { border-color: rgba(139, 92, 246, 0.55); background: rgba(139, 92, 246, 0.08); }
@@ -153,6 +188,21 @@
       position: absolute; top: 14px; right: 16px; font-size: 11px; font-weight: 700; letter-spacing: .06em;
       text-transform: uppercase; color: var(--accent-2);
     }
+
+    .entry .reacts { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+    .react {
+      font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; color: var(--muted);
+      display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 999px;
+      background: var(--card); border: 1px solid var(--card-border);
+      transition: border-color .15s, color .15s, transform .1s;
+    }
+    .react:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+    .react:active:not(:disabled) { transform: scale(.93); }
+    .react.on { color: var(--accent-2); border-color: rgba(139, 92, 246, .55); background: rgba(139, 92, 246, .1); }
+    .react:disabled { opacity: .45; cursor: not-allowed; }
+    .react .n { font-variant-numeric: tabular-nums; }
+    .react.bump .n { animation: bump .3s ease; }
+    @keyframes bump { 40% { transform: scale(1.4); } }
 
     .banner {
       display: flex; gap: 10px; align-items: flex-start; padding: 13px 18px; margin-bottom: 18px;
@@ -208,6 +258,7 @@
         <span class="ver" id="ver" title="Serving version">v…</span>
         <span class="replicas" id="replicas" title="Running replicas" hidden></span>
         <span class="online"><span class="pulse"></span> <span id="online">0</span> online</span>
+        <button class="icon-btn" id="themeBtn" title="Toggle light / dark theme" aria-label="Toggle light / dark theme">🌓</button>
       </div>
     </div>
 
@@ -300,7 +351,11 @@
       settings: ()             => fetch('/api/settings').then(r => r.json()),
       list:   (limit, offset)  => fetch(`/api/entries?limit=${limit}&offset=${offset}`).then(r => r.json()),
       create: (body)           => fetch('/api/entries', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+      react:  (id, emoji)      => fetch(`/api/entries/${id}/reactions?emoji=${emoji}`, { method: 'POST' }),
+      unreact:(id, emoji)      => fetch(`/api/entries/${id}/reactions?emoji=${emoji}`, { method: 'DELETE' }),
     };
+
+    const EMOJI = { heart: '❤️', tada: '🎉', thumbsup: '👍', smile: '😄' };
 
     let total = 0;        // total signatures (kept in sync via SSE)
     let allOffset = 0;    // current offset on the "All" page
@@ -325,6 +380,23 @@
       clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 3200);
     }
 
+    // ---- appearance (light / dark) -----------------------------------------
+    // Priority: moderator-forced theme > visitor's own choice > OS preference.
+    let serverTheme = '';
+    function applyTheme() {
+      const local = localStorage.getItem('gb-theme');
+      const mode = serverTheme || local || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      document.body.classList.toggle('light', mode === 'light');
+    }
+    $('themeBtn').addEventListener('click', () => {
+      const next = document.body.classList.contains('light') ? 'dark' : 'light';
+      localStorage.setItem('gb-theme', next);
+      if (!serverTheme) applyTheme();
+      else toast(`The moderator forced the ${serverTheme} theme — your choice will apply when it's released`);
+    });
+    matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyTheme);
+    applyTheme();
+
     function cardHTML(e) {
       const via = e.replica && e.replica !== 'seed'
         ? `<span class="via" title="Accepted by replica ${esc(e.replica)}">via ${esc(e.replica)}</span>` : '';
@@ -337,8 +409,55 @@
             <span class="when">· ${timeAgo(e.created_at)}</span>
             ${via}
           </div>
+          ${reactsHTML(e)}
         </li>`;
     }
+
+    // ---- reactions ----------------------------------------------------------
+    // One tap adds the browser's reaction, tapping again removes it. The own
+    // choices are kept in localStorage; the authoritative tally comes from the
+    // server (list payloads + live "reaction" SSE events).
+    function myReactions() { try { return JSON.parse(localStorage.getItem('gb-reacts') || '{}'); } catch { return {}; } }
+    function saveMyReaction(id, emoji, on) {
+      const m = myReactions();
+      if (on) m[id + ':' + emoji] = 1; else delete m[id + ':' + emoji];
+      localStorage.setItem('gb-reacts', JSON.stringify(m));
+    }
+    function reactsHTML(e) {
+      const mine = myReactions();
+      const counts = e.reactions || {};
+      const chips = Object.keys(EMOJI).map((k) => {
+        const n = counts[k] || 0;
+        const on = mine[e.id + ':' + k] ? ' on' : '';
+        return `<button class="react${on}" data-emoji="${k}" title="React ${EMOJI[k]}">${EMOJI[k]} <span class="n">${n}</span></button>`;
+      }).join('');
+      return `<div class="reacts">${chips}</div>`;
+    }
+    function updateReaction(id, emoji, count) {
+      document.querySelectorAll(`.entry[data-id="${id}"]`).forEach((li) => {
+        const btn = li.querySelector(`.react[data-emoji="${emoji}"]`);
+        if (!btn) return;
+        btn.querySelector('.n').textContent = count;
+        btn.classList.toggle('on', !!myReactions()[id + ':' + emoji]);
+        btn.classList.remove('bump'); void btn.offsetWidth; btn.classList.add('bump');
+      });
+    }
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.react');
+      if (!btn || btn.disabled) return;
+      const li = btn.closest('.entry'); if (!li) return;
+      const id = li.dataset.id, emoji = btn.dataset.emoji;
+      const adding = !btn.classList.contains('on');
+      saveMyReaction(id, emoji, adding);
+      btn.classList.toggle('on', adding); // instant feedback; SSE brings the tally
+      btn.disabled = true;
+      try {
+        const res = adding ? await api.react(id, emoji) : await api.unreact(id, emoji);
+        if (!res.ok) saveMyReaction(id, emoji, !adding); // revert on failure
+      } catch { saveMyReaction(id, emoji, !adding); }
+      btn.disabled = false;
+      btn.classList.toggle('on', !!myReactions()[id + ':' + emoji]);
+    });
 
     function renderList(ul, loading, entries, emptyMsg) {
       loading.style.display = 'none';
@@ -374,6 +493,8 @@
       const paused = !!(st && st.signing_paused);
       $('paused').hidden = !paused;
       $('form').hidden = paused;
+      serverTheme = (st && st.theme) || '';
+      applyTheme();
     }
 
     // ---- views --------------------------------------------------------------
@@ -469,6 +590,7 @@
       es.addEventListener('created',  (e) => { const d = JSON.parse(e.data); if (d.entry && !d.entry.hidden) onCreated(d.entry); });
       es.addEventListener('updated',  () => reloadView());
       es.addEventListener('deleted',  (e) => { const d = JSON.parse(e.data); onDeleted(d.id); });
+      es.addEventListener('reaction', (e) => { const d = JSON.parse(e.data); updateReaction(d.id, d.emoji, d.count); });
       es.addEventListener('settings', (e) => { const d = JSON.parse(e.data); applySettings(d.settings); });
       // Resync after a reconnect: events sent while disconnected were missed.
       es.addEventListener('open', () => { if (connectedOnce) { reloadView(); api.settings().then(applySettings).catch(() => {}); } connectedOnce = true; });
