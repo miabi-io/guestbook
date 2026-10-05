@@ -28,6 +28,9 @@ type Handler struct {
 
 	unhealthy atomic.Bool
 	chaos     chaosState
+	// requests counts HTTP requests answered by this replica since boot. A
+	// rolling update resets it one container at a time; see countRequests.
+	requests atomic.Int64
 }
 
 // serverTime is the shape of the live clock payload (v2 feature). It carries
@@ -71,12 +74,13 @@ func (h *Handler) Health(c *okapi.Context) error {
 		})
 	}
 	return c.OK(okapi.M{
-		"status":  "ok",
-		"db":      "up",
-		"redis":   h.broker.RedisStatus(c.Request().Context()),
-		"app":     h.appName,
-		"version": h.version,
-		"host":    h.host,
+		"status":   "ok",
+		"db":       "up",
+		"redis":    h.broker.RedisStatus(c.Request().Context()),
+		"app":      h.appName,
+		"version":  h.version,
+		"host":     h.host,
+		"requests": h.requests.Load(),
 	})
 }
 
@@ -85,13 +89,15 @@ func (h *Handler) Health(c *okapi.Context) error {
 // are currently connected.
 func (h *Handler) Info(c *okapi.Context) error {
 	return c.OK(okapi.M{
-		"app":      h.appName,
-		"version":  h.version,
-		"online":   h.broker.Online(),
-		"host":     h.host,
-		"broker":   h.broker.Mode(),
-		"replicas": h.broker.Replicas(),
-		"admin":    h.auth.Enabled(),
+		"app":       h.appName,
+		"version":   h.version,
+		"online":    h.broker.Online(),
+		"host":      h.host,
+		"broker":    h.broker.Mode(),
+		"replicas":  h.broker.Replicas(),
+		"requests":  h.requests.Load(),
+		"admin":     h.auth.Enabled(),
+		"reactions": ReactionEmojis(),
 	})
 }
 

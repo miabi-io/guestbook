@@ -6,7 +6,7 @@ import (
 )
 
 func TestLocalBroker(t *testing.T) {
-	b := NewBroker("host-a", "1.0.0")
+	b := NewBroker("host-a", "1.0.0", nil)
 	ch := b.Subscribe()
 	defer b.Unsubscribe(ch)
 

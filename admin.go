@@ -93,6 +93,7 @@ func (h *Handler) AdminOverview(c *okapi.Context) error {
 			"healthy":    !h.unhealthy.Load(),
 			"started_at": h.started.UTC().Format(time.RFC3339),
 			"uptime_s":   int64(time.Since(h.started).Seconds()),
+			"requests":   h.requests.Load(),
 			"go":         runtime.Version(),
 			"cpus":       runtime.NumCPU(),
 			"goroutines": runtime.NumGoroutine(),
@@ -166,6 +167,14 @@ func (h *Handler) AdminSaveSettings(c *okapi.Context) error {
 	st.Banner = strings.TrimSpace(st.Banner)
 	if len(st.Banner) > maxBannerLen {
 		return c.JSON(http.StatusBadRequest, okapi.M{"error": "banner is too long (max 200 characters)"})
+	}
+	switch st.Theme {
+	case "light", "dark":
+		// forced appearance for every visitor
+	case "", "system":
+		st.Theme = "" // follow each visitor's preference
+	default:
+		return c.JSON(http.StatusBadRequest, okapi.M{"error": "theme must be system, light or dark"})
 	}
 	if err := h.store.SaveSettings(c.Request().Context(), st); err != nil {
 		return c.JSON(http.StatusInternalServerError, okapi.M{"error": "could not save settings"})

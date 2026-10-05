@@ -17,13 +17,16 @@ import (
 //   - "created"  → Entry is set (a new signature)
 //   - "updated"  → Entry is set (pinned/hidden by a moderator)
 //   - "deleted"  → ID is set (a removed signature)
-//   - "settings" → Settings is set (signing paused, banner changed)
+//   - "reaction" → ID/Emoji/Count are set (an entry's tally changed)
+//   - "settings" → Settings is set (signing paused, banner changed, theme forced)
 //   - "presence" → Online/Replicas are set (connected clients changed)
 //   - "tick"     → Time/Version/Host are set (live server clock; new in v2)
 type Event struct {
 	Type     string    `json:"type"`
 	Entry    *Entry    `json:"entry,omitempty"`
 	ID       uint      `json:"id,omitempty"`
+	Emoji    string    `json:"emoji,omitempty"`
+	Count    int       `json:"count,omitempty"`
 	Settings *Settings `json:"settings,omitempty"`
 	Online   int       `json:"online,omitempty"`
 	Replicas int       `json:"replicas,omitempty"`
@@ -33,11 +36,15 @@ type Event struct {
 }
 
 // Replica describes one running instance of the app and its SSE clients.
+// Requests is the number of HTTP requests it has answered since boot: under
+// load-balancing the counts diverge, and a rollout resets them one replica at
+// a time — the rolling update made visible.
 type Replica struct {
-	Host    string    `json:"host"`
-	Version string    `json:"version"`
-	Online  int       `json:"online"`
-	Seen    time.Time `json:"seen"`
+	Host     string    `json:"host"`
+	Version  string    `json:"version"`
+	Online   int       `json:"online"`
+	Requests int64     `json:"requests"`
+	Seen     time.Time `json:"seen"`
 }
 
 const (
@@ -61,6 +68,7 @@ type Broker struct {
 	host, version string
 	rdb           *redis.Client
 	dirty         chan struct{}
+	requests      func() int64
 
 	cmu      sync.RWMutex
 	replicas []Replica
@@ -68,12 +76,15 @@ type Broker struct {
 }
 
 // NewBroker creates an in-process Broker. Call UseRedis to make it cluster-wide.
-func NewBroker(host, version string) *Broker {
+// requests reports how many HTTP requests this replica has served so far (may
+// be nil); it is advertised with the presence heartbeat.
+func NewBroker(host, version string, requests func() int64) *Broker {
 	return &Broker{
-		subs:    make(map[chan Event]struct{}),
-		host:    host,
-		version: version,
-		dirty:   make(chan struct{}, 1),
+		subs:     make(map[chan Event]struct{}),
+		host:     host,
+		version:  version,
+		dirty:    make(chan struct{}, 1),
+		requests: requests,
 	}
 }
 
@@ -203,7 +214,11 @@ func (b *Broker) Replicas() []Replica {
 }
 
 func (b *Broker) self() Replica {
-	return Replica{Host: b.host, Version: b.version, Online: b.localCount(), Seen: time.Now().UTC()}
+	var reqs int64
+	if b.requests != nil {
+		reqs = b.requests()
+	}
+	return Replica{Host: b.host, Version: b.version, Online: b.localCount(), Requests: reqs, Seen: time.Now().UTC()}
 }
 
 func (b *Broker) localCount() int {

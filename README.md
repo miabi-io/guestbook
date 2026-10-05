@@ -18,6 +18,17 @@ miniature:
   routes keep precedence
 - **Live updates over SSE** — new/removed signatures stream to every open tab,
   with a real-time **connected-clients** ("N online") indicator
+- **Emoji reactions** — visitors cheer a signature with ❤️ 🎉 👍 😄 (no
+  account; a cookie keeps counts honest) and the tally streams live to every
+  tab. Each reaction counts against a whitelist, so the endpoint can't be
+  used to spam arbitrary emoji
+- **Light & dark themes** — the wall follows the OS preference, visitors can
+  toggle it, and a moderator can **force a theme for everyone** from the admin
+  console (pushed live over SSE)
+- **Per-replica request counter** — `/healthz`, `/api/info` and the admin
+  replica table report how many requests *this* replica has answered since
+  boot. Under load-balancing the counts diverge; a rolling update resets them
+  one container at a time, which makes the rollout visible from the outside
 - **Version badge + live server-time card** — the serving build's version is
   shown in the UI and `/api/info`, and a **live clock** (streamed over SSE with
   the server's `version` + `host`) makes a **canary rollout** obvious: the card
@@ -34,11 +45,14 @@ miniature:
   across every replica via pub/sub; without it, the in-process broker makes the
   classic "works on one replica" bug easy to demonstrate
 - **Admin console** at `/admin`, guarded by a single `ADMIN_TOKEN` secret:
-  overview (stats, replicas, runtime), moderation (pin / hide / delete, signer
-  IP, CSV export), wall settings (pause signing, announcement banner) — all pushed live
+  overview (stats, replicas with per-replica request counters, runtime),
+  moderation (pin / hide / delete, signer IP, reaction tallies, CSV export),
+  wall settings (pause signing, announcement banner, forced wall theme) — all
+  pushed live
 - **Chaos lab** (`DEBUG_ENDPOINTS=true`): crash, fail health checks, burn CPU,
-  hold memory, burst logs, inject latency/5xx, plus an in-browser traffic probe
-  that shows load-balancing and canary splits
+  hold memory, burst logs, inject latency/5xx, a **rolling-update wave** that
+  bounces replicas one at a time while the replica table shows each one reset,
+  plus an in-browser traffic probe that shows load-balancing and canary splits
 - **Scheduled-job friendly CLI** — `guestbook cleanup` (purge/expire) and
   `guestbook migrate` subcommands for Miabi cron jobs and one-off jobs
 
@@ -60,13 +74,15 @@ and keeps the container tiny.
 
 | Method   | Path                 | Description                        |
 |----------|----------------------|------------------------------------|
-| `GET`    | `/healthz`           | Liveness/readiness (checks the DB), reports `version`, `host`, `redis` |
-| `GET`    | `/api/info`          | App name, serving `version`, `host`, online count, `broker` mode, `replicas` |
+| `GET`    | `/healthz`           | Liveness/readiness (checks the DB), reports `version`, `host`, `redis`, `requests` |
+| `GET`    | `/api/info`          | App name, serving `version`, `host`, online count, `broker` mode, `replicas` (with per-replica request counts), `requests`, reaction whitelist |
 | `GET`    | `/api/time`          | Current server time + `version` + `host` (v2 — canary probe) |
-| `GET`    | `/api/settings`      | Public wall settings: `signing_paused`, `banner` |
-| `GET`    | `/api/entries`       | Visible entries (pinned first) + total; paginated via `?limit=&offset=` |
+| `GET`    | `/api/settings`      | Public wall settings: `signing_paused`, `banner`, `theme` |
+| `GET`    | `/api/entries`       | Visible entries (pinned first) with reaction tallies + total; paginated via `?limit=&offset=` |
 | `POST`   | `/api/entries`       | Create `{ "name", "message" }` (broadcast live; `503` while paused) |
-| `GET`    | `/api/stream`        | **SSE** stream: `welcome`, `created`, `updated`, `deleted`, `settings`, `presence`, `tick` events |
+| `POST`   | `/api/entries/{id}/reactions?emoji=` | Add this browser's reaction (`heart`·`tada`·`thumbsup`·`smile`); idempotent, broadcasts the new tally |
+| `DELETE` | `/api/entries/{id}/reactions?emoji=` | Remove this browser's reaction |
+| `GET`    | `/api/stream`        | **SSE** stream: `welcome`, `created`, `updated`, `deleted`, `reaction`, `settings`, `presence`, `tick` events |
 | `GET`    | `/` · `/all` · `/admin` | The web UI (home · all signatures · admin console) |
 
 ### Admin API
@@ -77,11 +93,11 @@ or an `Authorization: Bearer <ADMIN_TOKEN>` header. Disabled (`404`) when
 
 | Method   | Path                          | Description |
 |----------|-------------------------------|-------------|
-| `GET`    | `/api/admin/overview`         | Stats (14-day histogram), replicas, runtime of the answering replica |
-| `GET`    | `/api/admin/entries`          | All entries; `?status=visible\|hidden\|pinned&q=&limit=&offset=` |
+| `GET`    | `/api/admin/overview`         | Stats (14-day histogram, reaction totals), replicas (with per-replica request counts), runtime of the answering replica |
+| `GET`    | `/api/admin/entries`          | All entries with reaction tallies; `?status=visible\|hidden\|pinned&q=&limit=&offset=` |
 | `PATCH`  | `/api/admin/entries/{id}`     | `{ "pinned"?: bool, "hidden"?: bool }` |
 | `DELETE` | `/api/admin/entries/{id}`     | Soft-delete an entry |
-| `GET`·`PUT` | `/api/admin/settings`      | `{ "signing_paused": bool, "banner": string }` |
+| `GET`·`PUT` | `/api/admin/settings`      | `{ "signing_paused": bool, "banner": string, "theme": "system\|light\|dark" }` |
 | `GET`    | `/api/admin/export.csv`       | Every entry as CSV |
 
 ### Debug API (chaos)
@@ -103,16 +119,19 @@ replica that receives it and echoes its `host`.
 
 `/api/stream` is a Server-Sent Events endpoint. On connect the client gets a
 `welcome` event (serving version + host + online count); thereafter the server
-pushes `created` / `deleted` events as the wall changes, `presence` events when
-the connected-client count changes, and a `tick` event once a second carrying
-the live server time (with `version` + `host`). The UI uses these to update the
-wall in real time, show a live **“N online”** indicator, and drive the
-**server-time card** — all without polling.
+pushes `created` / `updated` / `deleted` events as the wall changes, `reaction`
+events as tallies move, `settings` events when a moderator pauses signing,
+changes the banner or forces a theme, `presence` events when the
+connected-client count changes, and a `tick` event once a second carrying the
+live server time (with `version` + `host`). The UI uses these to update the
+wall in real time, show a live **“N online”** indicator, stream emoji-reaction
+tallies, and drive the **server-time card** — all without polling.
 
-With `REDIS_URL` set, `created`/`updated`/`deleted`/`settings` events go through
-a Redis pub/sub channel so every replica delivers them, and each replica
-advertises its client count under a short-TTL key so presence is cluster-wide.
-`tick` events stay per-replica on purpose: the clock shows who served you.
+With `REDIS_URL` set, `created`/`updated`/`deleted`/`reaction`/`settings`
+events go through a Redis pub/sub channel so every replica delivers them, and
+each replica advertises its client count **and request count** under a
+short-TTL key so presence is cluster-wide. `tick` events stay per-replica on
+purpose: the clock shows who served you.
 
 ## Configuration
 
