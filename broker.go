@@ -19,8 +19,10 @@ import (
 //   - "deleted"  → ID is set (a removed signature)
 //   - "reaction" → ID/Emoji/Count are set (an entry's tally changed)
 //   - "settings" → Settings is set (signing paused, banner changed, theme forced)
-//   - "presence" → Online/Replicas are set (connected clients changed)
-//   - "tick"     → Time/Version/Host are set (live server clock; new in v2)
+//   - "presence" → Online/Replicas/Visitors are set (connected clients or active
+//     visitor identities changed)
+//   - "tick"     → Time/Version/Host are set (live server clock; new in v2),
+//     plus Visitors (active identities; new in v3)
 type Event struct {
 	Type     string    `json:"type"`
 	Entry    *Entry    `json:"entry,omitempty"`
@@ -30,6 +32,7 @@ type Event struct {
 	Settings *Settings `json:"settings,omitempty"`
 	Online   int       `json:"online,omitempty"`
 	Replicas int       `json:"replicas,omitempty"`
+	Visitors int64     `json:"visitors,omitempty"`
 	Time     string    `json:"time,omitempty"`
 	Version  string    `json:"version,omitempty"`
 	Host     string    `json:"host,omitempty"`
@@ -69,6 +72,9 @@ type Broker struct {
 	rdb           *redis.Client
 	dirty         chan struct{}
 	requests      func() int64
+	// visitors reports how many visitor identities were recently active (from
+	// the database, so it is cluster-wide by construction); may be nil.
+	visitors func() int64
 
 	cmu      sync.RWMutex
 	replicas []Replica
@@ -229,13 +235,22 @@ func (b *Broker) localCount() int {
 
 func (b *Broker) presenceChanged() {
 	if b.rdb == nil {
-		b.emit(Event{Type: "presence", Online: b.localCount(), Replicas: 1})
+		b.emit(Event{Type: "presence", Online: b.localCount(), Replicas: 1, Visitors: b.visitorsActive()})
 		return
 	}
 	select {
 	case b.dirty <- struct{}{}:
 	default:
 	}
+}
+
+// visitorsActive returns the recent-visitor count, or 0 when no reporter is
+// registered.
+func (b *Broker) visitorsActive() int64 {
+	if b.visitors == nil {
+		return 0
+	}
+	return b.visitors()
 }
 
 func (b *Broker) publishRaw(ctx context.Context, ev Event) error {
@@ -321,7 +336,7 @@ func (b *Broker) refresh(ctx context.Context) {
 	b.cmu.Unlock()
 
 	if changed {
-		b.emit(Event{Type: "presence", Online: total, Replicas: len(replicas)})
+		b.emit(Event{Type: "presence", Online: total, Replicas: len(replicas), Visitors: b.visitorsActive()})
 	}
 }
 

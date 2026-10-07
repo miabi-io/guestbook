@@ -17,7 +17,7 @@ handy for logs, events and scaling.
 | 5 | Attach Redis → fixed | managed Redis, env prefix |
 | 6 | Break it on purpose (+ rolling wave) | restarts, health gating, alerts, logs, analytics |
 | 7 | Canary v1 → v2 | canary weights, promote |
-| 8 | Scheduled cleanup | cron jobs |
+| 8 | Scheduled cleanup + reset | cron jobs, one-off jobs |
 
 ---
 
@@ -66,6 +66,13 @@ docker push <registry>/guestbook:1.0.0 && docker push <registry>/guestbook:2.0.0
 Ask the audience to open the wall on their phones and sign it. The
 **online** counter climbs live. Have them tap the ❤️ / 🎉 reactions — the
 tallies move on every screen at once, with no refresh.
+
+> Talking point — visitor identity: each browser also gets a `gb_visitor`
+> cookie, and the wall greets it ("you are guest-… · N signatures"). The
+> backend only accepts the cookie while its id exists in the database — in
+> the admin console, the **Visitors** tile and table show every identity
+> issued, and **Visiting** counts the ones seen in the last 5 minutes.
+> Reactions are keyed on the same identity.
 
 ## 4. Scale out, and watch it break
 
@@ -136,18 +143,35 @@ updates, shown from the inside.
 > differ for the demo to work — but the clock card (absent in v1) makes the
 > split visible to the audience without a terminal.
 
-## 8. Scheduled cleanup
+## 8. Scheduled cleanup and reset
 
 The binary has a `cleanup` subcommand that permanently removes deleted
-signatures and optionally expires old ones:
+signatures, optionally expires old ones, and prunes idle visitor identities:
 
 ```bash
 guestbook cleanup --purge-after 168h              # default: purge deletes older than 7 days
 guestbook cleanup --max-age 720h --dry-run        # preview expiring >30-day-old, unpinned entries
+guestbook cleanup --prune-visitors 720h           # forget identities idle for 30 days (and their reactions)
 ```
 
 1. **Jobs** → *New cronjob*, image blank (uses the app's image), command `/app/guestbook cleanup --purge-after 1h`, schedule `*/15 * * * *`.
-2. Delete a signature in **Moderation**, then **Run now**. The job log shows `cleanup finished purged=… remaining=…`.
+2. Delete a signature in **Moderation**, then **Run now**. The job log shows `cleanup finished purged=… visitors_pruned=… remaining=…`.
+
+There is also a `reset` subcommand to **clean the database** between sessions
+— entries, reactions and visitor identities go (soft-deleted rows are wiped
+for good), wall settings are kept unless `--hard`:
+
+```bash
+guestbook reset --dry-run          # report what would be removed
+guestbook reset --reseed           # wipe, then insert the sample signatures
+guestbook reset --hard --reseed    # also reset banner/pause/theme
+```
+
+3. **Jobs** → *New job*, command `/app/guestbook reset --reseed`. The wall
+   empties immediately; every browser's `gb_visitor` cookie stops matching a
+   database row, so on the next request each visitor is handed a **fresh
+   identity** — the "you are …" card on the wall changes, and the admin
+   Visitors table starts refilling from zero.
 
 `guestbook migrate` works the same way as a one-off **Job**, for teams that
 want migrations as an explicit step rather than on boot.
@@ -158,4 +182,7 @@ want migrations as an explicit step rather than on boot.
 
 - Admin → Settings: clear the banner, set the theme back to *System*, un-pause.
 - Chaos lab: **Healthy**.
-- To wipe the wall: detach/recreate the database, or `DELETE FROM entries; DELETE FROM reactions;` and restart (the seed runs when the table is empty).
+- To wipe the wall: run `/app/guestbook reset --reseed` as a one-off **Job**
+  (entries, reactions and visitor identities go; the wall is re-seeded), or
+  detach/recreate the database. Browsers pick up a fresh identity cookie on
+  their next request either way.

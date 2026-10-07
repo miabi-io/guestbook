@@ -108,6 +108,8 @@
     td.mono { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
     tr.me td { color: #fff; }
     tr.me td:first-child::after { content: " ← you"; color: var(--accent-2); font-family: inherit; font-size: 11.5px; }
+    td.fresh { color: var(--ok); }
+    td.fresh::before { content: "● "; font-size: 10px; }
     dl.kv { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 0; font-size: 13.5px; }
     dl.kv dt { color: var(--muted); }
     dl.kv dd { margin: 0; font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
@@ -216,6 +218,8 @@
       <div id="tab-overview" data-panel>
         <div class="tiles">
           <div class="card tile live"><div class="label">Online now</div><div class="value" id="tOnline">–</div></div>
+          <div class="card tile"><div class="label">Visiting</div><div class="value" id="tVisiting" title="Visitor identities seen in the last 5 minutes">–</div></div>
+          <div class="card tile"><div class="label">Visitors</div><div class="value" id="tVisitors" title="Identity cookies the app has issued (rows in the visitors table)">–</div></div>
           <div class="card tile"><div class="label">Replicas</div><div class="value" id="tReplicas">–</div></div>
           <div class="card tile"><div class="label">Signatures</div><div class="value" id="tTotal">–</div></div>
           <div class="card tile"><div class="label">Today</div><div class="value" id="tToday">–</div></div>
@@ -241,6 +245,14 @@
               <h2>This replica</h2>
               <dl class="kv" id="runtime"></dl>
             </div>
+          </div>
+          <div class="card pad">
+            <h2>Visitors</h2>
+            <p class="hint">Every browser gets an identity cookie (<code>gb_visitor</code>); the backend accepts it only while its id exists in the database — after a <code>guestbook reset</code> every cookie is regenerated on the next request. Idle identities are pruned by the <code>cleanup</code> job (<code>--prune-visitors</code>).</p>
+            <table>
+              <thead><tr><th>Visitor</th><th>Name</th><th>Signatures</th><th>First seen</th><th>Last seen</th></tr></thead>
+              <tbody id="visitorRows"></tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -445,6 +457,8 @@
       $('appName').textContent = rt.app;
       setVersion(rt.version);
       $('tOnline').textContent = online;
+      $('tVisiting').textContent = overview.visitors ?? 0;
+      $('tVisitors').textContent = stats.visitors ?? 0;
       $('tReplicas').textContent = replicas.length;
       $('tTotal').textContent = stats.total;
       $('tToday').textContent = stats.today;
@@ -452,6 +466,7 @@
       $('tPinned').textContent = stats.pinned;
       $('tHidden').textContent = stats.hidden;
       renderChart(stats.daily || []);
+      loadVisitors();
 
       $('replicaHint').innerHTML = rt.broker === 'redis'
         ? 'Presence is shared through Redis, so every replica is listed. The requests counter grows per replica and resets when a rollout replaces it.'
@@ -500,6 +515,22 @@
             <span class="d">${show ? label : '&nbsp;'}</span>
           </div>`;
       }).join('');
+    }
+
+    // ---- visitors ----------------------------------------------------------
+    async function loadVisitors() {
+      const r = await req('GET', '/api/admin/visitors?limit=25');
+      if (!r.ok || !r.data) return;
+      const activeSince = new Date(r.data.active_since || 0).getTime();
+      const rows = r.data.visitors || [];
+      $('visitorRows').innerHTML = rows.length ? rows.map((v) => `
+        <tr>
+          <td class="mono">${esc(String(v.id).slice(0, 8))}…</td>
+          <td>${esc(v.name || '–')}</td>
+          <td>${v.signatures}</td>
+          <td title="${esc(new Date(v.first_seen).toLocaleString())}">${ago(v.first_seen)}</td>
+          <td class="${new Date(v.last_seen).getTime() >= activeSince ? 'fresh' : ''}" title="${esc(new Date(v.last_seen).toLocaleString())}">${ago(v.last_seen)}</td>
+        </tr>`).join('') : '<tr><td colspan="5" class="empty">No visitor identities yet — they are created on the first request.</td></tr>';
     }
 
     // ---- moderation --------------------------------------------------------

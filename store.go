@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/glebarez/sqlite" // pure-Go SQLite (no CGO — keeps the static build)
+	"github.com/google/uuid"     // visitor identity ids (v4 UUIDs)
 	"github.com/jkaninda/logger"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -35,8 +37,8 @@ type Entry struct {
 }
 
 // Reaction is one emoji reaction to an entry. Visitors react and un-react
-// without an account, so a short-lived cookie ("who") prevents the same
-// browser from inflating the count.
+// without an account; the "who" is their visitor id (see Visitor), so the
+// same browser cannot inflate the count.
 type Reaction struct {
 	EntryID   uint           `gorm:"primaryKey;autoIncrement:false" json:"-"`
 	Emoji     string         `gorm:"primaryKey;type:varchar(16)" json:"-"`
@@ -44,6 +46,23 @@ type Reaction struct {
 	CreatedAt time.Time      `json:"-"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
+
+// Visitor is a browser the app knows about. The identity cookie carries the
+// UUID; the row in this table is what makes it valid — a cookie whose id is
+// not in the database is discarded and regenerated. That keeps identities
+// honest across database resets and lets stale identities be pruned by the
+// cleanup job.
+type Visitor struct {
+	ID string `gorm:"primaryKey;type:varchar(36)" json:"id"`
+	// Name is the last name the visitor signed with; the form pre-fills it.
+	Name       string    `gorm:"type:varchar(60)" json:"name,omitempty"`
+	FirstSeen  time.Time `json:"first_seen"`
+	LastSeen   time.Time `gorm:"index" json:"last_seen"`
+	Signatures int64     `gorm:"not null;default:0" json:"signatures"`
+}
+
+// IsZero reports whether v is an unidentified visitor (no valid cookie).
+func (v *Visitor) IsZero() bool { return v == nil || v.ID == "" }
 
 // Setting is a key/value row holding app-wide state shared by all replicas.
 type Setting struct {
@@ -99,6 +118,7 @@ type Stats struct {
 	Pinned    int64      `json:"pinned"`
 	Today     int64      `json:"today"`
 	Reactions int64      `json:"reactions"`
+	Visitors  int64      `json:"visitors"`
 	Daily     []DayCount `json:"daily"`
 }
 
@@ -176,7 +196,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // concurrent AutoMigrate calls race on Postgres catalog inserts.
 func (s *Store) Migrate() error {
 	return s.Exclusive(context.Background(), func(tx *Store) error {
-		return tx.db.AutoMigrate(&Entry{}, &Setting{}, &Reaction{})
+		return tx.db.AutoMigrate(&Entry{}, &Setting{}, &Reaction{}, &Visitor{})
 	})
 }
 
@@ -299,6 +319,153 @@ func (s *Store) ReactionTotals(ctx context.Context) (int64, error) {
 	return n, err
 }
 
+// FindVisitor loads a visitor by id. Returns false when the id is unknown —
+// the caller then discards the cookie and issues a fresh identity.
+func (s *Store) FindVisitor(ctx context.Context, id string) (Visitor, bool, error) {
+	var v Visitor
+	err := s.db.WithContext(ctx).First(&v, "id = ?", id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return v, false, nil
+	}
+	return v, err == nil, err
+}
+
+// CreateVisitor inserts a new identity with the given UUID.
+func (s *Store) CreateVisitor(ctx context.Context, id string) (Visitor, error) {
+	now := time.Now().UTC()
+	v := Visitor{ID: id, FirstSeen: now, LastSeen: now}
+	err := s.db.WithContext(ctx).Create(&v).Error
+	return v, err
+}
+
+// TouchVisitor stamps the visitor's last-seen time.
+func (s *Store) TouchVisitor(ctx context.Context, id string, at time.Time) {
+	s.db.WithContext(ctx).Model(&Visitor{}).Where("id = ?", id).Update("last_seen", at)
+}
+
+// VisitorSigned records a new signature: it bumps the counter and remembers
+// the name, so the form can be pre-filled on the next visit.
+func (s *Store) VisitorSigned(ctx context.Context, id, name string) {
+	s.db.WithContext(ctx).Model(&Visitor{}).
+		Where("id = ?", id).
+		Updates(map[string]any{"name": name, "signatures": gorm.Expr("signatures + 1")})
+}
+
+// VisitorCount returns the number of identities the app has issued.
+func (s *Store) VisitorCount(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Model(&Visitor{}).Count(&n).Error
+	return n, err
+}
+
+// VisitorsSeenAfter counts visitors active since the given time — the
+// "currently visiting" number, distinct from connected SSE clients.
+func (s *Store) VisitorsSeenAfter(ctx context.Context, since time.Time) (int64, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Model(&Visitor{}).Where("last_seen >= ?", since).Count(&n).Error
+	return n, err
+}
+
+// AdminVisitors lists the most recently active visitors.
+func (s *Store) AdminVisitors(ctx context.Context, limit int) ([]Visitor, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var visitors []Visitor
+	err := s.db.WithContext(ctx).Order("last_seen DESC").Limit(limit).Find(&visitors).Error
+	return visitors, err
+}
+
+// PurgeVisitors permanently removes visitors idle since cutoff, together with
+// their reactions, so a later signup with a fresh cookie starts clean. It
+// returns the number of visitors removed.
+func (s *Store) PurgeVisitors(ctx context.Context, cutoff time.Time, dryRun bool) (int64, error) {
+	scope := s.db.WithContext(ctx).Where("last_seen < ?", cutoff)
+	if dryRun {
+		var n int64
+		err := scope.Model(&Visitor{}).Count(&n).Error
+		return n, err
+	}
+	var ids []string
+	if err := scope.Model(&Visitor{}).Pluck("id", &ids).Error; err != nil || len(ids) == 0 {
+		return 0, err
+	}
+	if err := s.db.WithContext(ctx).Where("who IN ?", ids).Delete(&Reaction{}).Error; err != nil {
+		return 0, err
+	}
+	res := s.db.WithContext(ctx).Where("id IN ?", ids).Delete(&Visitor{})
+	return res.RowsAffected, res.Error
+}
+
+// ResetStats reports what Reset removed (or would remove, when DryRun).
+type ResetStats struct {
+	Entries   int64 `json:"entries"`
+	Reactions int64 `json:"reactions"`
+	Visitors  int64 `json:"visitors"`
+	Settings  int64 `json:"settings"`
+	DryRun    bool  `json:"dry_run"`
+}
+
+// Reset wipes the wall so a demo can start from scratch (typically run as a
+// one-off Job, followed by a restart to re-seed). Entries and reactions
+// always go; settings are kept unless hard is set. With dryRun it only
+// reports what would be removed.
+func (s *Store) Reset(ctx context.Context, hard, dryRun bool) (ResetStats, error) {
+	var out ResetStats
+	out.DryRun = dryRun
+	err := s.Exclusive(ctx, func(tx *Store) error {
+		count := func(model any, dst *int64, unscoped bool) error {
+			q := tx.db.WithContext(ctx).Model(model)
+			if unscoped {
+				q = q.Unscoped()
+			}
+			return q.Count(dst).Error
+		}
+		// Soft-deleted entries are gone for good too: after a reset there is
+		// nothing left to purge.
+		if err := count(&Entry{}, &out.Entries, true); err != nil {
+			return err
+		}
+		if err := count(&Reaction{}, &out.Reactions, false); err != nil {
+			return err
+		}
+		if err := count(&Visitor{}, &out.Visitors, false); err != nil {
+			return err
+		}
+		if hard {
+			if err := count(&Setting{}, &out.Settings, false); err != nil {
+				return err
+			}
+		}
+		if dryRun {
+			return nil
+		}
+		wipe := func(model any) error {
+			// "WHERE 1=1" satisfies GORM's global-delete guard.
+			return tx.db.WithContext(ctx).Unscoped().Where("1 = 1").Delete(model).Error
+		}
+		for _, model := range []any{&Entry{}, &Reaction{}, &Visitor{}} {
+			if err := wipe(model); err != nil {
+				return err
+			}
+		}
+		if hard {
+			return wipe(&Setting{})
+		}
+		return nil
+	})
+	return out, err
+}
+
+// NewVisitorID returns a random UUID for a fresh identity.
+func NewVisitorID() string { return uuid.NewString() }
+
+// ValidVisitorID reports whether id is a syntactically valid visitor id.
+// A malformed cookie is discarded without hitting the database.
+func ValidVisitorID(id string) bool {
+	return len(id) == 36 && uuid.Validate(id) == nil
+}
+
 // Delete soft-deletes an entry by id. Returns true when a row was affected.
 func (s *Store) Delete(ctx context.Context, id uint64) (bool, error) {
 	res := s.db.WithContext(ctx).Delete(&Entry{}, id)
@@ -411,6 +578,7 @@ func (s *Store) Stats(ctx context.Context, days int) (Stats, error) {
 	s.db.WithContext(ctx).Model(&Entry{}).Where("hidden = ?", true).Count(&st.Hidden)
 	s.db.WithContext(ctx).Model(&Entry{}).Where("pinned = ?", true).Count(&st.Pinned)
 	s.db.WithContext(ctx).Model(&Reaction{}).Count(&st.Reactions)
+	s.db.WithContext(ctx).Model(&Visitor{}).Count(&st.Visitors)
 	st.Visible = st.Total - st.Hidden
 
 	now := time.Now().UTC()

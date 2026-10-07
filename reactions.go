@@ -1,12 +1,9 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/jkaninda/okapi"
 	"gorm.io/gorm"
@@ -14,37 +11,8 @@ import (
 
 // Reactions let visitors cheer a signature without an account: one tap adds,
 // tapping again removes, and the tally streams to every open tab over SSE.
-// A first-party cookie identifies the browser so a count can't be inflated by
-// hammering the endpoint.
-
-const (
-	reactionCookie    = "gb_reactor"
-	reactionCookieTTL = 365 * 24 * time.Hour
-)
-
-// reactorID returns the stable, anonymous id of this browser, setting the
-// cookie on first sight.
-func reactorID(c *okapi.Context) string {
-	if id, err := c.Cookie(reactionCookie); err == nil && len(id) >= 8 && len(id) <= 64 {
-		return id
-	}
-	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
-		return ""
-	}
-	id := hex.EncodeToString(buf)
-	r := c.Request()
-	http.SetCookie(c.ResponseWriter(), &http.Cookie{
-		Name:     reactionCookie,
-		Value:    id,
-		Path:     "/",
-		MaxAge:   int(reactionCookieTTL.Seconds()),
-		HttpOnly: true,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
-		SameSite: http.SameSiteLaxMode,
-	})
-	return id
-}
+// The visitor identity cookie (see visitors.go) identifies the browser, so a
+// count can't be inflated by hammering the endpoint.
 
 // parseReactionRequest validates the {id} path param and the ?emoji= query.
 func parseReactionRequest(c *okapi.Context) (uint64, string, error) {
@@ -69,7 +37,7 @@ func (h *Handler) React(c *okapi.Context) error {
 	if _, err := h.store.Get(ctx, id); errors.Is(err, gorm.ErrRecordNotFound) {
 		return c.JSON(http.StatusNotFound, okapi.M{"error": "entry not found"})
 	}
-	who := reactorID(c)
+	who := visitorFromContext(c).ID
 	if who == "" {
 		return c.JSON(http.StatusInternalServerError, okapi.M{"error": "could not identify the browser"})
 	}
@@ -88,7 +56,7 @@ func (h *Handler) Unreact(c *okapi.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, okapi.M{"error": err.Error()})
 	}
-	who := reactorID(c)
+	who := visitorFromContext(c).ID
 	if who == "" {
 		return c.JSON(http.StatusInternalServerError, okapi.M{"error": "could not identify the browser"})
 	}
@@ -101,7 +69,7 @@ func (h *Handler) Unreact(c *okapi.Context) error {
 }
 
 // countRequests is middleware that tallies the HTTP requests this replica has
-// answered since it started. The number lands in /healthz, /api/info and the
+// answered since boot. The number lands in /healthz, /api/info and the
 // admin replica table: it grows per replica under load-balancing and drops
 // back to ~0 when a rollout replaces a container, which makes recreate and
 // rolling updates visible from the outside.

@@ -81,6 +81,7 @@ func (h *Handler) AdminOverview(c *okapi.Context) error {
 		"stats":    stats,
 		"settings": settings,
 		"online":   h.broker.Online(),
+		"visitors": h.visitorsActive(ctx),
 		"replicas": h.broker.Replicas(),
 		"debug":    h.debug,
 		"runtime": okapi.M{
@@ -125,6 +126,18 @@ func (h *Handler) AdminListEntries(c *okapi.Context) error {
 		out[i] = toAdmin(e)
 	}
 	return c.OK(okapi.M{"entries": out, "total": total, "limit": limit, "offset": offset})
+}
+
+// AdminVisitors lists the most recently active visitor identities, so the
+// console can show the cookies the app has issued and who is around now.
+func (h *Handler) AdminVisitors(c *okapi.Context) error {
+	limit := atoiDefault(c.Query("limit"), 50)
+	visitors, err := h.store.AdminVisitors(c.Request().Context(), limit)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, okapi.M{"error": "could not load visitors"})
+	}
+	fresh := time.Now().Add(-visitorFreshWindow)
+	return c.OK(okapi.M{"visitors": visitors, "active_since": fresh.UTC().Format(time.RFC3339)})
 }
 
 // AdminUpdateEntry pins/unpins or hides/unhides an entry and broadcasts it.

@@ -19,9 +19,15 @@ miniature:
 - **Live updates over SSE** — new/removed signatures stream to every open tab,
   with a real-time **connected-clients** ("N online") indicator
 - **Emoji reactions** — visitors cheer a signature with ❤️ 🎉 👍 😄 (no
-  account; a cookie keeps counts honest) and the tally streams live to every
-  tab. Each reaction counts against a whitelist, so the endpoint can't be
-  used to spam arbitrary emoji
+  account; the visitor identity keeps counts honest) and the tally streams
+  live to every tab. Each reaction counts against a whitelist, so the
+  endpoint can't be used to spam arbitrary emoji
+- **Visitor identity cookie** (new in v3) — every browser gets a `gb_visitor`
+  cookie whose UUID the backend checks **against the database** on each API
+  request: unknown ids (first visit, pruned identity, or a wiped database) are
+  discarded and regenerated. The identity remembers the name you signed with,
+  drives the reaction de-dupe, and feeds a live **“N visiting”** counter
+  (distinct from connected SSE clients)
 - **Light & dark themes** — the wall follows the OS preference, visitors can
   toggle it, and a moderator can **force a theme for everyone** from the admin
   console (pushed live over SSE)
@@ -53,8 +59,10 @@ miniature:
   hold memory, burst logs, inject latency/5xx, a **rolling-update wave** that
   bounces replicas one at a time while the replica table shows each one reset,
   plus an in-browser traffic probe that shows load-balancing and canary splits
-- **Scheduled-job friendly CLI** — `guestbook cleanup` (purge/expire) and
-  `guestbook migrate` subcommands for Miabi cron jobs and one-off jobs
+- **Scheduled-job friendly CLI** — `guestbook cleanup` (purge/expire/prune
+  visitors) and `guestbook migrate` for Miabi cron jobs, plus
+  **`guestbook reset`** to wipe the wall (entries, reactions, identities;
+  `--reseed`, `--hard`) as a one-off job
 
 **Presenting it?** [`DEMO.md`](DEMO.md) is a step-by-step training runbook.
 - **Single static binary** — the whole UI is embedded with `go:embed`, so the
@@ -75,9 +83,10 @@ and keeps the container tiny.
 | Method   | Path                 | Description                        |
 |----------|----------------------|------------------------------------|
 | `GET`    | `/healthz`           | Liveness/readiness (checks the DB), reports `version`, `host`, `redis`, `requests` |
-| `GET`    | `/api/info`          | App name, serving `version`, `host`, online count, `broker` mode, `replicas` (with per-replica request counts), `requests`, reaction whitelist |
+| `GET`    | `/api/info`          | App name, serving `version`, `host`, online count, active `visitors`, `broker` mode, `replicas` (with per-replica request counts), `requests`, reaction whitelist |
 | `GET`    | `/api/time`          | Current server time + `version` + `host` (v2 — canary probe) |
 | `GET`    | `/api/settings`      | Public wall settings: `signing_paused`, `banner`, `theme` |
+| `GET`    | `/api/me`            | The caller's visitor identity: id, remembered name, signature count, first seen |
 | `GET`    | `/api/entries`       | Visible entries (pinned first) with reaction tallies + total; paginated via `?limit=&offset=` |
 | `POST`   | `/api/entries`       | Create `{ "name", "message" }` (broadcast live; `503` while paused) |
 | `POST`   | `/api/entries/{id}/reactions?emoji=` | Add this browser's reaction (`heart`·`tada`·`thumbsup`·`smile`); idempotent, broadcasts the new tally |
@@ -93,7 +102,8 @@ or an `Authorization: Bearer <ADMIN_TOKEN>` header. Disabled (`404`) when
 
 | Method   | Path                          | Description |
 |----------|-------------------------------|-------------|
-| `GET`    | `/api/admin/overview`         | Stats (14-day histogram, reaction totals), replicas (with per-replica request counts), runtime of the answering replica |
+| `GET`    | `/api/admin/overview`         | Stats (14-day histogram, reaction + visitor totals), replicas (with per-replica request counts), runtime of the answering replica |
+| `GET`    | `/api/admin/visitors`         | Recent visitor identities (name remembered, signature count, last seen; `?limit=`) |
 | `GET`    | `/api/admin/entries`          | All entries with reaction tallies; `?status=visible\|hidden\|pinned&q=&limit=&offset=` |
 | `PATCH`  | `/api/admin/entries/{id}`     | `{ "pinned"?: bool, "hidden"?: bool }` |
 | `DELETE` | `/api/admin/entries/{id}`     | Soft-delete an entry |
@@ -132,6 +142,26 @@ events go through a Redis pub/sub channel so every replica delivers them, and
 each replica advertises its client count **and request count** under a
 short-TTL key so presence is cluster-wide. `tick` events stay per-replica on
 purpose: the clock shows who served you.
+
+### Visitor identity
+
+Every API request passes through middleware that resolves the caller's
+**visitor identity**: if the `gb_visitor` cookie is missing, malformed, or its
+id is **not found in the `visitors` table**, the backend mints a new UUID,
+persists it and rewrites the cookie. Known ids are kept and stamped
+(`last_seen`). The identity:
+
+- remembers the **name** you signed with (pre-filled next time, used for
+  unsigned posts),
+- keys **reaction** de-duplication (replacing the old standalone reaction
+  cookie),
+- feeds the **“N visiting”** counter on the wall, in `/api/info`, the admin
+  overview and the `tick`/`presence` SSE events (identities seen in the last
+  5 minutes — read from the database, so it is cluster-wide with no Redis).
+
+Because validity lives in the database, a `guestbook reset` (or pruning by the
+`cleanup` job) invalidates every outstanding cookie: browsers silently get a
+fresh identity on their next request.
 
 ## Configuration
 
@@ -176,7 +206,8 @@ go run .                 # runs the default "server" command
 go run . server -p 9000  # okapicli flags: choose the port
 go run . --help          # list commands and flags
 go run . migrate         # apply migrations and exit
-go run . cleanup --purge-after 168h --max-age 720h --dry-run
+go run . cleanup --purge-after 168h --max-age 720h --prune-visitors 720h --dry-run
+go run . reset --dry-run # preview a full wipe; add --reseed to refill the wall
 ```
 
 To point it at your own Postgres, set `DATABASE_URL` (or the `DB_*` vars) first:
