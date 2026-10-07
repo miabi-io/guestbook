@@ -215,6 +215,10 @@
     .paused b { color: var(--text); }
     .replicas { font-size: 12.5px; color: var(--muted); padding: 5px 12px; border-radius: 999px;
       background: var(--card); border: 1px solid var(--card-border); white-space: nowrap; }
+    .clock-meta .you { color: var(--text); font-weight: 600; }
+    .visitors { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted);
+      padding: 5px 12px; border-radius: 999px; background: var(--card); border: 1px solid var(--card-border);
+      white-space: nowrap; }
 
     .empty, .loading { text-align: center; color: var(--muted); padding: 40px 20px; font-size: 15px; }
 
@@ -257,7 +261,8 @@
       <div class="status">
         <span class="ver" id="ver" title="Serving version">v…</span>
         <span class="replicas" id="replicas" title="Running replicas" hidden></span>
-        <span class="online"><span class="pulse"></span> <span id="online">0</span> online</span>
+        <span class="visitors" id="visitors" title="Visitor identities active in the last 5 minutes (issued by the identity cookie)" hidden>👤 <span id="visitorCount">0</span></span>
+        <span class="online" title="Browsers connected to the live stream right now"><span class="pulse"></span> <span id="online">0</span> online</span>
         <button class="icon-btn" id="themeBtn" title="Toggle light / dark theme" aria-label="Toggle light / dark theme">🌓</button>
       </div>
     </div>
@@ -280,6 +285,8 @@
         <div class="clock-time" id="clockTime">—</div>
       </div>
       <div class="clock-meta" id="clockMeta">waiting for server…</div>
+      <!-- Visitor identity (new in v3): the server recognises this browser -->
+      <div class="clock-meta" id="visitorMeta" hidden></div>
     </div>
 
     <!-- Home view -->
@@ -347,6 +354,7 @@
 
     const api = {
       info:   ()               => fetch('/api/info').then(r => r.json()),
+      me:     ()               => fetch('/api/me').then(r => r.json()),
       time:   ()               => fetch('/api/time').then(r => r.json()),
       settings: ()             => fetch('/api/settings').then(r => r.json()),
       list:   (limit, offset)  => fetch(`/api/entries?limit=${limit}&offset=${offset}`).then(r => r.json()),
@@ -486,6 +494,28 @@
       $('replicas').hidden = false;
       $('replicas').textContent = n === 1 ? '1 replica' : n + ' replicas';
     }
+    function setVisitors(n) {
+      if (!n) return;
+      $('visitors').hidden = false;
+      $('visitorCount').textContent = n;
+    }
+
+    // ---- visitor identity ---------------------------------------------------
+    // The server recognises this browser by the gb_visitor cookie: it checks
+    // the cookie's id against the database and hands out a new one when it is
+    // unknown (first visit, pruned identity, or a wiped database). /api/me
+    // reports who the server thinks we are; the remembered name pre-fills the
+    // form.
+    function showVisitor(v) {
+      if (!v || !v.id) return;
+      const el = $('visitorMeta');
+      el.hidden = false;
+      const bits = [`you are <span class="you">${esc(v.name || 'guest-' + String(v.id).slice(0, 8))}</span>`];
+      if (v.signatures > 0) bits.push(`${v.signatures} signature${v.signatures === 1 ? '' : 's'}`);
+      if (v.first_seen) bits.push(`since ${timeAgo(v.first_seen)}`);
+      el.innerHTML = bits.join(' · ');
+      if (v.name && !$('name').value) $('name').value = v.name;
+    }
     function applySettings(st) {
       const banner = (st && st.banner) || '';
       $('banner').hidden = !banner;
@@ -585,8 +615,8 @@
     let connectedOnce = false;
     function connectSSE() {
       const es = new EventSource('/api/stream');
-      es.addEventListener('welcome',  (e) => { const d = JSON.parse(e.data); setVersion(d.version); setOnline(d.online); setReplicas(d.replicas); });
-      es.addEventListener('presence', (e) => { const d = JSON.parse(e.data); setOnline(d.online); setReplicas(d.replicas); });
+      es.addEventListener('welcome',  (e) => { const d = JSON.parse(e.data); setVersion(d.version); setOnline(d.online); setReplicas(d.replicas); setVisitors(d.visitors); });
+      es.addEventListener('presence', (e) => { const d = JSON.parse(e.data); setOnline(d.online); setReplicas(d.replicas); setVisitors(d.visitors); });
       es.addEventListener('created',  (e) => { const d = JSON.parse(e.data); if (d.entry && !d.entry.hidden) onCreated(d.entry); });
       es.addEventListener('updated',  () => reloadView());
       es.addEventListener('deleted',  (e) => { const d = JSON.parse(e.data); onDeleted(d.id); });
@@ -594,7 +624,7 @@
       es.addEventListener('settings', (e) => { const d = JSON.parse(e.data); applySettings(d.settings); });
       // Resync after a reconnect: events sent while disconnected were missed.
       es.addEventListener('open', () => { if (connectedOnce) { reloadView(); api.settings().then(applySettings).catch(() => {}); } connectedOnce = true; });
-      es.addEventListener('tick',     (e) => { const d = JSON.parse(e.data); showTime(d); setVersion(d.version); });
+      es.addEventListener('tick',     (e) => { const d = JSON.parse(e.data); showTime(d); setVersion(d.version); setVisitors(d.visitors); });
       // EventSource auto-reconnects on error; nothing to do here.
     }
 
@@ -620,10 +650,11 @@
 
     // ---- boot ---------------------------------------------------------------
     api.info().then((d) => {
-      setVersion(d.version); setOnline(d.online); setReplicas((d.replicas || []).length);
+      setVersion(d.version); setOnline(d.online); setReplicas((d.replicas || []).length); setVisitors(d.visitors);
       $('adminLink').hidden = !d.admin;
       if (d.broker) { $('brokerPill').hidden = false; $('brokerPill').textContent = d.broker === 'redis' ? 'Redis pub/sub' : 'In-process broker'; }
     }).catch(() => {});
+    api.me().then(showVisitor).catch(() => {});
     api.settings().then(applySettings).catch(() => {});
     api.time().then(showTime).catch(() => {}); // immediate clock; SSE ticks keep it live
     route();

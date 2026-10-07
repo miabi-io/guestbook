@@ -98,7 +98,19 @@ func (h *Handler) Info(c *okapi.Context) error {
 		"requests":  h.requests.Load(),
 		"admin":     h.auth.Enabled(),
 		"reactions": ReactionEmojis(),
+		"visitors":  h.visitorsActive(c.Request().Context()),
 	})
+}
+
+// visitorsActive counts identities seen in the last few minutes — the
+// "currently visiting" number. It degrades to 0 on a database hiccup; the
+// SSE presence event simply carries whatever the database last said.
+func (h *Handler) visitorsActive(ctx context.Context) int64 {
+	n, err := h.store.VisitorsSeenAfter(ctx, time.Now().Add(-visitorFreshWindow))
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // PublicSettings returns the wall state visitors need: paused flag and banner.
@@ -172,9 +184,6 @@ func (h *Handler) CreateEntry(c *okapi.Context) error {
 	name := strings.TrimSpace(req.Name)
 	message := strings.TrimSpace(req.Message)
 
-	if name == "" {
-		name = "Anonymous"
-	}
 	if r := []rune(name); len(r) > maxNameLen {
 		name = string(r[:maxNameLen])
 	}
@@ -187,9 +196,23 @@ func (h *Handler) CreateEntry(c *okapi.Context) error {
 		})
 	}
 
+	// The visitor identity ties the signature to a browser: an unsigned post
+	// keeps the name the visitor used before, and a signed post is remembered
+	// for next time.
+	visitor := visitorFromContext(c)
+	if name == "" {
+		name = visitorName(visitor)
+	}
+	if name == "" {
+		name = "Anonymous"
+	}
+
 	entry, err := h.store.Create(ctx, name, message, h.host, clientIP(c))
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, okapi.M{"error": "could not save entry"})
+	}
+	if !visitor.IsZero() {
+		h.store.VisitorSigned(ctx, visitor.ID, name)
 	}
 
 	h.broker.Publish(Event{Type: "created", Entry: &entry})
@@ -233,6 +256,7 @@ func (h *Handler) Stream(c *okapi.Context) error {
 			"online":   h.broker.Online(),
 			"replicas": len(h.broker.Replicas()),
 			"host":     h.host,
+			"visitors": h.visitorsActive(ctx),
 		}}
 		select {
 		case msgs <- welcome:

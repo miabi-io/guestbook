@@ -10,7 +10,7 @@
 // /healthz readiness probe, and a single static binary that ships the whole
 // frontend embedded — no Node build step.
 //
-// Subcommands (okapicli): server (default), migrate, cleanup.
+// Subcommands (okapicli): server (default), migrate, cleanup, reset.
 package main
 
 import (
@@ -61,6 +61,14 @@ func main() {
 	}).
 		Duration("purge-after", "", 7*24*time.Hour, "Permanently remove entries deleted longer ago than this").
 		Duration("max-age", "", 0, "Also delete unpinned entries older than this (0 = keep forever)").
+		Duration("prune-visitors", "", 30*24*time.Hour, "Forget visitor identities idle longer than this (0 = keep forever)").
+		Bool("dry-run", "", false, "Report what would be removed without changing anything")
+
+	cli.Command("reset", "Wipe the database: entries, reactions and visitor identities (run as a one-off job)", func(cmd *okapicli.Command) error {
+		return runReset(cmd, cfg)
+	}).
+		Bool("hard", "", false, "Also reset the wall settings (pause, banner, theme)").
+		Bool("reseed", "", false, "Insert the sample signatures after the wipe").
 		Bool("dry-run", "", false, "Report what would be removed without changing anything")
 
 	cli.DefaultCommand("server")
@@ -107,6 +115,7 @@ func runServer(cmd *okapicli.Command, cfg Config) error {
 		started:  time.Now(),
 	}
 	broker.requests = h.requests.Load
+	broker.visitors = func() int64 { return h.visitorsActive(context.Background()) }
 	if !h.auth.Enabled() {
 		logger.Warn("admin console disabled: set ADMIN_TOKEN to enable /admin")
 	}
@@ -139,10 +148,14 @@ func runServer(cmd *okapicli.Command, cfg Config) error {
 func registerRoutes(app *okapi.Okapi, h *Handler) {
 	app.Get("/healthz", h.Health)
 
-	api := app.Group("/api")
+	// Every API request resolves the visitor identity: the cookie is checked
+	// against the database and regenerated when its id is unknown (fresh
+	// browser, pruned identity, or a reset database).
+	api := app.Group("/api", h.identifyVisitor)
 	api.Get("/info", h.Info)
 	api.Get("/time", h.Time)
 	api.Get("/settings", h.PublicSettings)
+	api.Get("/me", h.VisitorMe)
 	api.Get("/entries", h.ListEntries)
 	api.Post("/entries", h.CreateEntry)
 	api.Post("/entries/{id:int}/reactions", h.React)
@@ -153,13 +166,14 @@ func registerRoutes(app *okapi.Okapi, h *Handler) {
 	api.Post("/admin/login", h.AdminLogin)
 	api.Post("/admin/logout", h.AdminLogout)
 
-	admin := app.Group("/api/admin", h.auth.Require)
+	admin := app.Group("/api/admin", h.identifyVisitor, h.auth.Require)
 	admin.Get("/overview", h.AdminOverview)
 	admin.Get("/entries", h.AdminListEntries)
 	admin.Patch("/entries/{id:int}", h.AdminUpdateEntry)
 	admin.Delete("/entries/{id:int}", h.DeleteEntry)
 	admin.Get("/settings", h.AdminSettings)
 	admin.Put("/settings", h.AdminSaveSettings)
+	admin.Get("/visitors", h.AdminVisitors)
 	admin.Get("/export.csv", h.AdminExport)
 
 	debug := app.Group("/api/debug", h.auth.Require, h.RequireDebug)
@@ -211,8 +225,56 @@ func runCleanup(cmd *okapicli.Command, cfg Config) error {
 			return err
 		}
 	}
+	var pruned int64
+	if prune := cmd.GetDuration("prune-visitors"); prune > 0 {
+		if pruned, err = store.PurgeVisitors(ctx, now.Add(-prune), dryRun); err != nil {
+			return err
+		}
+	}
 	remaining, _ := store.Count(ctx)
-	logger.Info("cleanup finished", "purged", purged, "expired", expired, "remaining", remaining, "dry_run", dryRun)
+	logger.Info("cleanup finished",
+		"purged", purged, "expired", expired, "visitors_pruned", pruned,
+		"remaining", remaining, "dry_run", dryRun)
+	return nil
+}
+
+// runReset wipes the database (the "clean slate" job): entries, reactions and
+// visitor identities go, settings stay unless --hard. With --reseed the sample
+// signatures are inserted right away; otherwise restart the app so its first
+// boot seeds the empty wall. The wall's cookies stop matching any visitor row
+// after a reset, so browsers get a fresh identity on their next request.
+func runReset(cmd *okapicli.Command, cfg Config) error {
+	ctx := context.Background()
+	store, err := openStore(cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+
+	dryRun := cmd.GetBool("dry-run")
+	hard := cmd.GetBool("hard")
+
+	stats, err := store.Reset(ctx, hard, dryRun)
+	if err != nil {
+		return err
+	}
+	if dryRun {
+		logger.Info("reset dry run, nothing removed",
+			"entries", stats.Entries, "reactions", stats.Reactions,
+			"visitors", stats.Visitors, "settings", stats.Settings)
+		return nil
+	}
+	logger.Warn("database reset",
+		"entries", stats.Entries, "reactions", stats.Reactions,
+		"visitors", stats.Visitors, "settings", stats.Settings, "hard", hard)
+
+	if cmd.GetBool("reseed") {
+		if err := Seed(ctx, store, cfg.DBDriver); err != nil {
+			return err
+		}
+	} else {
+		logger.Info("wall is empty; restart the app to re-seed it")
+	}
 	return nil
 }
 
@@ -242,10 +304,11 @@ func publishTicks(ctx context.Context, b *Broker, version, host string) {
 			return
 		case now := <-t.C:
 			b.PublishLocal(Event{
-				Type:    "tick",
-				Time:    now.Format(time.RFC3339),
-				Version: version,
-				Host:    host,
+				Type:     "tick",
+				Time:     now.Format(time.RFC3339),
+				Version:  version,
+				Host:     host,
+				Visitors: b.visitorsActive(),
 			})
 		}
 	}
