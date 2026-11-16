@@ -1,0 +1,40 @@
+# Prometheus scraping every guestbook replica on the workspace network, for DEMO.md act 9.
+# The UI is public and has no login: delete this app after the demo.
+apiVersion: miabi.io/v1
+kind: Config
+metadata:
+  name: guestbook-prometheus
+spec:
+  data:
+    prometheus.yml: |
+      global:
+        scrape_interval: 5s
+      scrape_configs:
+        - job_name: guestbook
+          # In a Swarm cluster tasks.guestbook lists every replica; on one node without Swarm, use guestbook.
+          dns_sd_configs:
+            - names: [tasks.guestbook]
+              type: A
+              port: 9090
+              refresh_interval: 10s
+---
+apiVersion: miabi.io/v1
+kind: Application
+metadata:
+  name: prometheus
+spec:
+  image: prom/prometheus
+  tag: v3.5.0
+  command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=1d"]
+  ports:
+    - container: 9090
+      externalAccess: true
+  healthcheck:
+    type: http
+    path: /-/ready
+  mounts:
+    - config: guestbook-prometheus
+      key: prometheus.yml
+      path: /etc/prometheus/prometheus.yml
+  resources:
+    memory: 256Mi

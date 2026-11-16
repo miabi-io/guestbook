@@ -45,6 +45,7 @@ func (h *Handler) React(c *okapi.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, okapi.M{"error": "could not save the reaction"})
 	}
+	h.metrics.Reaction(emoji, "add")
 	h.broker.Publish(Event{Type: "reaction", ID: uint(id), Emoji: emoji, Count: count})
 	return c.OK(okapi.M{"entry_id": id, "emoji": emoji, "count": count})
 }
@@ -64,6 +65,7 @@ func (h *Handler) Unreact(c *okapi.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, okapi.M{"error": "could not remove the reaction"})
 	}
+	h.metrics.Reaction(emoji, "remove")
 	h.broker.Publish(Event{Type: "reaction", ID: uint(id), Emoji: emoji, Count: count})
 	return c.OK(okapi.M{"entry_id": id, "emoji": emoji, "count": count})
 }
