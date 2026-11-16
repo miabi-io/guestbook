@@ -27,12 +27,15 @@ type Config struct {
 	DebugEndpoints bool
 	// TrustedProxies limits whose X-Forwarded-For is believed (CIDRs).
 	TrustedProxies []string
+
+	MetricsEnabled bool
+	MetricsPort    int
 }
 
 // LoadConfig builds the Config from the environment.
 func LoadConfig() (Config, error) {
 	driver, dsn := resolveDatabase()
-	return Config{
+	cfg := Config{
 		Port:        goutils.EnvInt("PORT", 8080),
 		AppName:     goutils.Env("APP_NAME", "Miabi Guestbook"),
 		Version:     resolveVersion(),
@@ -44,7 +47,14 @@ func LoadConfig() (Config, error) {
 		AdminToken:     goutils.Env("ADMIN_TOKEN", ""),
 		DebugEndpoints: goutils.Env("DEBUG_ENDPOINTS", "false") == "true",
 		TrustedProxies: splitList(goutils.Env("TRUSTED_PROXIES", "")),
-	}, nil
+
+		MetricsEnabled: goutils.Env("METRICS_ENABLED", "true") != "false",
+		MetricsPort:    goutils.EnvInt("METRICS_PORT", 9090),
+	}
+	if cfg.MetricsEnabled && cfg.MetricsPort == cfg.Port {
+		return cfg, fmt.Errorf("METRICS_PORT and PORT are both %d: give the metrics server its own port, or set METRICS_ENABLED=false", cfg.Port)
+	}
+	return cfg, nil
 }
 
 // resolveDatabase picks the database driver and DSN.

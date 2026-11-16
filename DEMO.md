@@ -18,6 +18,7 @@ handy for logs, events and scaling.
 | 6 | Break it on purpose (+ rolling wave) | restarts, health gating, alerts, logs, analytics |
 | 7 | Canary v1 → v2 | canary weights, promote |
 | 8 | Scheduled cleanup + reset | cron jobs, one-off jobs |
+| 9 | Metrics with Prometheus | private ports, configs, app-to-app networking |
 
 ---
 
@@ -32,11 +33,12 @@ docker push <registry>/guestbook:1.0.0 && docker push <registry>/guestbook:2.0.0
 - Pick an admin token: `openssl rand -hex 16`.
 - Create an empty Postgres and a Redis in the workspace ahead of time, since provisioning is slower than talking.
 - Open `scripts/hammer.sh` in a terminal (see act 7).
+- Acts 4–7 need replicas, so run the demo on a location in a Swarm cluster. A single node without Swarm covers acts 1–3, 6 (without the rolling wave), 8 and 9.
 
 ## 1. Deploy
 
 1. **New application**, from the Git repo (the `.miabi/pipeline.yaml` builds, scans and deploys) or from image `guestbook:1.0.0`.
-2. Port `8080`. **Health check**: HTTP, path `/healthz`. (The default is *none*, and without it act 6 loses its punch.)
+2. Port `8080`, plus port `9090` **without** external access: that is the metrics server, used in act 9. **Health check**: HTTP, path `/healthz`. (The default is *none*, and without it act 6 loses its punch.) In a Swarm cluster choose **Image** instead: the image's own check runs `/app/guestbook healthcheck`, because a service probes HTTP with `curl` or `wget`, which the distroless image doesn't have.
 3. Add a domain. TLS is issued automatically.
 4. Open the wall. It runs on **SQLite**, as the first seeded signature says.
 
@@ -154,7 +156,7 @@ guestbook cleanup --max-age 720h --dry-run        # preview expiring >30-day-old
 guestbook cleanup --prune-visitors 720h           # forget identities idle for 30 days (and their reactions)
 ```
 
-1. **Jobs** → *New cronjob*, image blank (uses the app's image), command `/app/guestbook cleanup --purge-after 1h`, schedule `*/15 * * * *`.
+1. **Jobs** → *New cronjob*, image blank (uses the app's image), command `cleanup --purge-after 1h`, schedule `*/15 * * * *`. The command is passed to the image's entrypoint, `/app/guestbook`, so leave the binary out of it.
 2. Delete a signature in **Moderation**, then **Run now**. The job log shows `cleanup finished purged=… visitors_pruned=… remaining=…`.
 
 There is also a `reset` subcommand to **clean the database** between sessions
@@ -167,7 +169,7 @@ guestbook reset --reseed           # wipe, then insert the sample signatures
 guestbook reset --hard --reseed    # also reset banner/pause/theme
 ```
 
-3. **Jobs** → *New job*, command `/app/guestbook reset --reseed`. The wall
+3. **Jobs** → *New job*, command `reset --reseed`. The wall
    empties immediately; every browser's `gb_visitor` cookie stops matching a
    database row, so on the next request each visitor is handed a **fresh
    identity** — the "you are …" card on the wall changes, and the admin
@@ -176,13 +178,50 @@ guestbook reset --hard --reseed    # also reset banner/pause/theme
 `guestbook migrate` works the same way as a one-off **Job**, for teams that
 want migrations as an explicit step rather than on boot.
 
+## 9. Metrics with Prometheus
+
+The guestbook serves Prometheus metrics on a second port, `9090`, which act 1
+declared without external access: the wall is public, `/metrics` is not.
+`METRICS_ENABLED=false` turns the metrics server off.
+
+1. Apply [`deploy/prometheus.yaml`](deploy/prometheus.yaml): a **Config** holding
+   `prometheus.yml` and a **Prometheus** app that mounts it.
+   ```bash
+   miabi apply -f deploy/prometheus.yaml
+   ```
+   On a single node without Swarm, change `tasks.guestbook` to `guestbook` in the
+   config first.
+2. Open the Prometheus URL, **Status → Targets**: one target per guestbook replica,
+   found by name on the workspace network. Nothing was published to reach it.
+3. Run a few queries in **Graph** while `scripts/hammer.sh` runs:
+
+   | Query | Shows |
+   |---|---|
+   | `sum by (route) (rate(guestbook_http_requests_total[1m]))` | Traffic per route, by pattern (`/api/entries/{id}/reactions`), never per entry id |
+   | `histogram_quantile(0.95, sum by (le) (rate(guestbook_http_request_duration_seconds_bucket[1m])))` | p95 latency. Click **Probe `/api/debug/slow`** in the Chaos lab and watch it jump |
+   | `sum by (instance) (guestbook_sse_clients)` | Live-stream browsers per replica. Ask the room to open the wall |
+   | `increase(guestbook_reactions_total[5m])` | Reactions by emoji, as the audience taps them |
+   | `guestbook_build_info` | Which version and host each replica runs |
+
+4. Scale the app up or down: within ten seconds the target list follows. Crash a
+   replica from the Chaos lab and its counters restart from zero, like the request
+   counters in act 6.
+
+> Talking point: the app owns its metrics, Miabi gives it a private port and a
+> network where a sibling app can reach it by name. The same `/metrics` works
+> with any Prometheus or Grafana Agent you already run.
+
+> During a canary (act 7), the canary release joins the `guestbook` name only
+> once promoted, so Prometheus sees the stable replicas until then.
+
 ---
 
 ## Reset between sessions
 
 - Admin → Settings: clear the banner, set the theme back to *System*, un-pause.
 - Chaos lab: **Healthy**.
-- To wipe the wall: run `/app/guestbook reset --reseed` as a one-off **Job**
+- Delete the Prometheus app and its config (`miabi delete -f deploy/prometheus.yaml`): its UI has no login.
+- To wipe the wall: run `reset --reseed` as a one-off **Job**
   (entries, reactions and visitor identities go; the wall is re-seeded), or
   detach/recreate the database. Browsers pick up a fresh identity cookie on
   their next request either way.

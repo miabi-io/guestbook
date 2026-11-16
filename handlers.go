@@ -25,6 +25,7 @@ type Handler struct {
 	dbDriver string
 	debug    bool
 	started  time.Time
+	metrics  *Metrics
 
 	unhealthy atomic.Bool
 	chaos     chaosState
@@ -215,6 +216,7 @@ func (h *Handler) CreateEntry(c *okapi.Context) error {
 		h.store.VisitorSigned(ctx, visitor.ID, name)
 	}
 
+	h.metrics.EntryCreated()
 	h.broker.Publish(Event{Type: "created", Entry: &entry})
 	return c.Created(entry)
 }
@@ -233,6 +235,7 @@ func (h *Handler) DeleteEntry(c *okapi.Context) error {
 		return c.JSON(http.StatusNotFound, okapi.M{"error": "entry not found"})
 	}
 
+	h.metrics.EntryDeleted()
 	h.broker.Publish(Event{Type: "deleted", ID: uint(id)})
 	return c.NoContent()
 }

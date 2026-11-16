@@ -184,10 +184,38 @@ fresh identity on their next request.
 | `ADMIN_TOKEN`  | —                | Enables `/admin`. Store it as a **secret**. |
 | `TRUSTED_PROXIES` | —             | Comma-separated CIDRs whose `X-Forwarded-For` is trusted when recording a signer's IP (e.g. `10.0.0.0/8`). Unset: the header is taken as-is — fine behind the Miabi gateway, spoofable if the app is exposed directly. |
 | `DEBUG_ENDPOINTS` | `false`       | `true` enables the `/api/debug/*` chaos endpoints (still admin-only). |
+| `METRICS_ENABLED` | `true`        | `false` turns off the Prometheus metrics server. |
+| `METRICS_PORT` | `9090`           | Port of the metrics server, separate from `PORT` so `/metrics` is never public by accident. |
 
 > **On Miabi:** attach a managed database to the app and Miabi injects these
 > variables automatically — `DATABASE_URL` for the full DSN, plus the discrete
 > `DB_*` parts. You don't set them by hand.
+
+## Metrics
+
+A second HTTP server on `METRICS_PORT` (default `9090`) serves Prometheus metrics at `/metrics`.
+It is on by default; set `METRICS_ENABLED=false` to turn it off. It runs on its own port, so it
+stays private unless you expose that port: on Miabi, declare `9090` as a port without external
+access and scrape it from inside the workspace network.
+
+| Metric | Type | |
+|---|---|---|
+| `guestbook_http_requests_total{method,route,status}` | counter | Requests answered, by route pattern (`/api/entries/{id}`), never the raw path |
+| `guestbook_http_request_duration_seconds{method,route}` | histogram | Response time; the long-lived SSE stream is left out |
+| `guestbook_http_requests_in_flight` | gauge | Requests in progress, open SSE streams included |
+| `guestbook_entries_created_total`, `guestbook_entries_deleted_total` | counter | Signatures written, and deleted by a moderator, through this replica |
+| `guestbook_reactions_total{emoji,action}` | counter | Reactions added or removed through this replica |
+| `guestbook_entries` | gauge | Signatures visible on the wall |
+| `guestbook_sse_clients` | gauge | Browsers on this replica's live stream |
+| `guestbook_visitors_active` | gauge | Browsers seen in the last few minutes, all replicas |
+| `guestbook_database_up`, `guestbook_healthy` | gauge | Database ping, and whether the chaos lab forced `/healthz` to fail |
+| `guestbook_build_info{version,host,db,broker}` | gauge | Always 1: which build and replica is answering, handy under a canary |
+
+The Go runtime and process metrics (`go_*`, `process_*`) come with it. Every replica serves its
+own numbers, so sum across replicas in your queries. Locally, `docker compose --profile
+monitoring up` adds a Prometheus at http://localhost:9091 that scrapes the app. On Miabi,
+[`deploy/prometheus.yaml`](deploy/prometheus.yaml) deploys one next to the app; see act 9 of
+[`DEMO.md`](DEMO.md).
 
 ## Run locally
 
@@ -206,6 +234,7 @@ go run .                 # runs the default "server" command
 go run . server -p 9000  # okapicli flags: choose the port
 go run . --help          # list commands and flags
 go run . migrate         # apply migrations and exit
+go run . healthcheck     # probe a running server's /healthz, as the image's HEALTHCHECK does
 go run . cleanup --purge-after 168h --max-age 720h --prune-visitors 720h --dry-run
 go run . reset --dry-run # preview a full wipe; add --reseed to refill the wall
 ```
@@ -222,7 +251,7 @@ go run .
 
 ```bash
 docker build --build-arg VERSION=1.0.0 -t miabi-guestbook:1.0.0 .
-docker run -p 8080:8080 -e DATABASE_URL=postgres://... miabi/guestbook:1.0.0
+docker run -p 8080:8080 -p 9090:9090 -e DATABASE_URL=postgres://... miabi/guestbook:1.0.0
 ```
 
 The version can also be overridden at runtime with `-e APP_VERSION=…`.
@@ -260,10 +289,25 @@ docker build --build-arg VERSION=2.0.0 -t miabi/guestbook:2.0.0 .
 
 ## Deploy on Miabi
 
+[`deploy/guestbook.yaml`](deploy/guestbook.yaml) declares the whole setup: a managed Postgres, a
+managed Redis, a generated `ADMIN_TOKEN`, the app with its public port and private metrics port,
+and an hourly `cleanup` job.
+
+```bash
+miabi apply -f deploy/guestbook.yaml --dry-run   # read the plan
+miabi apply -f deploy/guestbook.yaml
+```
+
+Read the admin token from the workspace's **Secrets** (`guestbook-admin-token`). Add
+[`deploy/prometheus.yaml`](deploy/prometheus.yaml) to scrape the metrics. Or set it up by hand:
+
 1. **Create a database** — provision a PostgreSQL database in your workspace.
 2. **Create an application** — deploy this repo (Git build) or the image above.
 3. **Attach the database** — Miabi injects the connection as `DATABASE_URL`.
-4. **Set the health check** to `GET /healthz` and the port to `8080`.
+4. **Set the health check** to `GET /healthz` and the port to `8080`. Running it as a replicated
+   service in a Swarm cluster? Use the image's own check (`healthcheck: { type: image }`): a
+   service probes `http` with the image's `curl` or `wget`, which distroless lacks.
+   Add `9090` as a second port, without external access, to scrape `/metrics`.
 5. **Connect a domain** — Miabi issues automatic SSL and routes traffic.
 6. **Optional:** add `ADMIN_TOKEN` as a secret, scale replicas, and attach a
    managed Redis with the `REDIS` prefix. See [`DEMO.md`](DEMO.md).

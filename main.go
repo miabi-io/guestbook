@@ -16,6 +16,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -45,6 +46,11 @@ func main() {
 	cli.Command("server", "Start the Guestbook HTTP server", func(cmd *okapicli.Command) error {
 		return runServer(cmd, cfg)
 	}).Int("port", "p", cfg.Port, "HTTP server port")
+
+	// Distroless has no curl or shell, so the image's HEALTHCHECK runs the binary itself.
+	cli.Command("healthcheck", "Probe this container's /healthz and exit non-zero when it is not ready", func(cmd *okapicli.Command) error {
+		return probeHealth(cfg.Port)
+	})
 
 	cli.Command("migrate", "Apply database migrations and exit (e.g. as a pre-deploy step)", func(cmd *okapicli.Command) error {
 		store, err := openStore(cfg)
@@ -103,6 +109,10 @@ func runServer(cmd *okapicli.Command, cfg Config) error {
 	go publishTicks(ctx, broker, cfg.Version, host)
 	logger.Info("live updates ready", "broker", broker.Mode())
 
+	var metrics *Metrics
+	if cfg.MetricsEnabled {
+		metrics = NewMetrics()
+	}
 	h := &Handler{
 		store:    store,
 		broker:   broker,
@@ -113,6 +123,7 @@ func runServer(cmd *okapicli.Command, cfg Config) error {
 		dbDriver: cfg.DBDriver,
 		debug:    cfg.DebugEndpoints,
 		started:  time.Now(),
+		metrics:  metrics,
 	}
 	broker.requests = h.requests.Load
 	broker.visitors = func() int64 { return h.visitorsActive(context.Background()) }
@@ -122,11 +133,21 @@ func runServer(cmd *okapicli.Command, cfg Config) error {
 	if h.debug {
 		logger.Warn("debug endpoints enabled under /api/debug (admin auth required)")
 	}
+	var metricsServer *MetricsServer
+	if metrics != nil {
+		metrics.Watch(h)
+		if metricsServer, err = StartMetricsServer(metrics, cfg.MetricsPort); err != nil {
+			return fmt.Errorf("metrics server on port %d: %w", cfg.MetricsPort, err)
+		}
+		logger.Info("metrics ready", "addr", metricsServer.Addr(), "path", "/metrics")
+	} else {
+		logger.Info("metrics disabled by METRICS_ENABLED=false")
+	}
 
 	app := cmd.Okapi()
 	app.WithPort(cmd.GetInt("port"))
 	app.WithDebug()
-	app.Use(okapi.LoggerMiddleware, okapi.RequestID(), h.countRequests)
+	app.Use(okapi.LoggerMiddleware, okapi.RequestID(), h.countRequests, metrics.Middleware)
 	registerRoutes(app, h)
 
 	return cmd.CLI().RunServer(&okapicli.RunOptions{
@@ -139,6 +160,7 @@ func runServer(cmd *okapicli.Command, cfg Config) error {
 			closeCtx, done := context.WithTimeout(context.Background(), 2*time.Second)
 			defer done()
 			cancel()
+			_ = metricsServer.Shutdown(closeCtx)
 			broker.Close(closeCtx)
 			_ = store.Close()
 		},
@@ -324,4 +346,17 @@ func migrateWithRetry(store *Store, attempts int, wait time.Duration) error {
 		time.Sleep(wait)
 	}
 	return err
+}
+
+func probeHealth(port int) error {
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/healthz", port))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("healthz answered %d", resp.StatusCode)
+	}
+	return nil
 }

@@ -1,0 +1,72 @@
+# The guestbook with a managed Postgres, a managed Redis for live updates across replicas, a
+# generated admin token and an hourly cleanup job. Deploy with:
+#   miabi apply -f deploy/guestbook.yaml
+apiVersion: miabi.io/v1
+kind: Database
+metadata:
+  name: guestbook-db
+spec:
+  engine: postgres
+  version: "17-alpine"
+---
+apiVersion: miabi.io/v1
+kind: Database
+metadata:
+  name: guestbook-redis
+spec:
+  engine: redis
+  version: "8-alpine"
+---
+apiVersion: miabi.io/v1
+kind: Secret
+metadata:
+  name: guestbook-admin-token
+spec:
+  generate: true
+  length: 32
+---
+apiVersion: miabi.io/v1
+kind: Application
+metadata:
+  name: guestbook
+spec:
+  image: miabi/guestbook
+  tag: "3.3.0"
+  externalLabel: guestbook
+  ports:
+    - name: http
+      container: 8080
+      externalAccess: true
+    - name: metrics          # private: scraped from the workspace network, see prometheus.yaml
+      container: 9090
+  env:
+    DATABASE_URL: "{{ .databases.guestbook-db.uri }}"
+    REDIS_URL: "{{ .databases.guestbook-redis.uri }}"
+    ADMIN_TOKEN: "{{ .secrets.guestbook-admin-token }}"
+  healthcheck:
+    type: http
+    path: /healthz
+    intervalSeconds: 10
+  deployment:
+    strategy: rolling
+  # In a Swarm cluster, run replicas as a service and use the image's own check:
+  #   deployment: { runtime: service, replicas: 3, strategy: rolling }
+  #   healthcheck: { type: image }
+  security:
+    noNewPrivileges: true
+    capabilities:
+      drop: [ALL]
+  resources:
+    memory: 256Mi
+    cpu: "0.5"
+---
+apiVersion: miabi.io/v1
+kind: CronJob
+metadata:
+  name: guestbook-cleanup
+spec:
+  app: guestbook
+  schedule: "0 * * * *"
+  command: ["cleanup", "--purge-after", "168h", "--prune-visitors", "720h"]
+  concurrencyPolicy: forbid
+  historyLimit: 10

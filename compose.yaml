@@ -35,6 +35,19 @@ services:
         condition: service_started
     ports:
       - "8080:8080"
+      - "9090:9090"
+
+  # docker compose --profile monitoring up, then open http://localhost:9091
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [monitoring]
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./scripts/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9091:9090"
+    depends_on:
+      - app
 
 volumes:
   db-data:

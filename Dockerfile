@@ -28,8 +28,12 @@ COPY --from=build --chown=nonroot:nonroot /data /data
 VOLUME ["/data"]
 
 ENV PORT=8080 \
+    METRICS_PORT=9090 \
     DB_PATH=/data/guestbook.db
-EXPOSE 8080
+EXPOSE 8080 9090
+
+# Distroless has no curl or shell, so the binary probes its own /healthz.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 CMD ["/app/guestbook", "healthcheck"]
 
 # Runs as the non-root user provided by the distroless image.
 ENTRYPOINT ["/app/guestbook"]
